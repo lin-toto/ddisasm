@@ -110,6 +110,8 @@ const char* binaryISA(gtirb::ISA Arch)
         case gtirb::ISA::MIPS32:
         case gtirb::ISA::MIPS64:
             return "MIPS";
+        case gtirb::ISA::ValidButUnsupported:
+            return "ValidButUnsupported";
         default:
             return "Undefined";
     }

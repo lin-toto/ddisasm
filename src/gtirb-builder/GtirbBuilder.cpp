@@ -22,6 +22,7 @@
 //===----------------------------------------------------------------------===//
 #include "./GtirbBuilder.h"
 
+#include "../AuxDataSchema.h"
 #include "./ArchiveReader.h"
 #include "./ElfReader.h"
 #include "./PeReader.h"
@@ -151,6 +152,13 @@ void GtirbBuilder::initModule()
     Module->setFileFormat(format());
     Module->setISA(isa());
     Module->setByteOrder(endianness());
+
+    if(Binary->header().architecture() == LIEF::Header::ARCHITECTURES::RISCV)
+    {
+        std::map<std::string, std::string> ArchInfo;
+        ArchInfo["ISA"] = Binary->header().is_64() ? "RISCV64" : "RISCV32";
+        Module->addAuxData<gtirb::schema::ArchInfo>(std::move(ArchInfo));
+    }
 }
 
 gtirb::ByteOrder GtirbBuilder::endianness()
@@ -197,6 +205,8 @@ gtirb::ISA GtirbBuilder::isa()
             return gtirb::ISA::ARM64;
         case LIEF::Header::ARCHITECTURES::MIPS:
             return gtirb::ISA::MIPS32;
+        case LIEF::Header::ARCHITECTURES::RISCV:
+            return gtirb::ISA::ValidButUnsupported;
         case LIEF::Header::ARCHITECTURES::UNKNOWN:
             return gtirb::ISA::Undefined;
         default:

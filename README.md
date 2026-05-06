@@ -30,6 +30,8 @@ Instruction Set Architectures (ISAs):
 -  ARM32
 -  ARM64
 -  MIPS32
+-  RISCV32
+-  RISCV64
 
 ## Getting Started
 

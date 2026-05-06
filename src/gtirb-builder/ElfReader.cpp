@@ -1356,6 +1356,9 @@ std::string ElfReader::getRelocationType(const LIEF::ELF::Relocation &Entry)
         case LIEF::ELF::ARCH::MIPS:
             Prefix = "MIPS_";
             break;
+        case LIEF::ELF::ARCH::RISCV:
+            Prefix = "RISCV_";
+            break;
         default:
             break;
     }
@@ -1366,7 +1369,16 @@ std::string ElfReader::getRelocationType(const LIEF::ELF::Relocation &Entry)
     {
         Type = RawType.substr(std::char_traits<char>::length(Prefix));
     }
-    else
+    else if(Prefix)
+    {
+        std::string ElfPrefix = "R_" + std::string(Prefix);
+        if(RawType.rfind(ElfPrefix, 0) == 0)
+        {
+            Type = RawType.substr(ElfPrefix.size());
+        }
+    }
+
+    if(Type == RawType)
     {
         std::string Msg("Unsupported Relocation Type: ");
         Msg += RawType;

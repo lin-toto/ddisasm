@@ -1,0 +1,1007 @@
+//===- riscv_symbolization.dl -------------------------------*- datalog -*-===//
+//
+//  Copyright (C) 2026 GrammaTech, Inc.
+//
+//  This code is licensed under the GNU Affero General Public License
+//  as published by the Free Software Foundation, either version 3 of
+//  the License, or (at your option) any later version. See the
+//  LICENSE.txt file in the project root for license terms or visit
+//  https://www.gnu.org/licenses/agpl.txt.
+//
+//===----------------------------------------------------------------------===//
+/**
+RISC-V architecture-specific rules for symbolization.
+*/
+
+/**
+RISC-V mapping symbols identify code and data regions but should not be
+selected as symbolic expression targets.
+*/
+.decl riscv_mapping_symbol(Name:symbol)
+
+riscv_mapping_symbol("$x").
+riscv_mapping_symbol("$d").
+
+riscv_mapping_symbol(Name):-
+    defined_symbol(_,_,_,_,_,_,_,_,Name),
+    (
+        // $x.N / $d.N style mapping symbols.
+        substr(Name,0,3) = "$x.";
+        substr(Name,0,3) = "$d.";
+        // ISA-qualified code mapping symbols, e.g. $xrv64i...
+        substr(Name,0,4) = "$xrv"
+    ).
+
+avoid_symbols(Name):-
+    riscv_mapping_symbol(Name).
+
+/**
+Instruction width, in bytes, for RISC-V relocations that apply to an
+instruction encoding.
+*/
+.decl riscv_relocation_width(Type:symbol,Size:unsigned)
+
+riscv_relocation_width("BRANCH",4).
+riscv_relocation_width("JAL",4).
+// CALL/CALL_PLT relocations cover an AUIPC/JALR pair and require pprinter
+// support for multi-instruction operands, so they are intentionally omitted
+// from this instruction-sized table.
+riscv_relocation_width("GOT_HI20",4).
+riscv_relocation_width("HI20",4).
+riscv_relocation_width("LO12_I",4).
+riscv_relocation_width("LO12_S",4).
+riscv_relocation_width("PCREL_HI20",4).
+riscv_relocation_width("PCREL_LO12_I",4).
+riscv_relocation_width("PCREL_LO12_S",4).
+riscv_relocation_width("GPREL_I",4).
+riscv_relocation_width("GPREL_S",4).
+riscv_relocation_width("TLS_GD_HI20",4).
+riscv_relocation_width("TPREL_HI20",4).
+riscv_relocation_width("TPREL_LO12_I",4).
+riscv_relocation_width("TPREL_LO12_S",4).
+riscv_relocation_width("RVC_BRANCH",2).
+riscv_relocation_width("RVC_JUMP",2).
+
+/**
+RISC-V code relocations are recorded at the start of the instruction.
+*/
+instruction_has_relocation(EA,EA):-
+    relocation(EA,Type,_,_,_,_,_),
+    riscv_relocation_width(Type,_).
+
+/**
+Recover relocated control-flow targets.  The generic ELF rule assumes the
+active relocation symbol table, which is not enough for executables built with
+--emit-relocs because text relocations commonly refer into .symtab even when
+.dynsym is present.
+*/
+.decl riscv_control_flow_relocation(Type:symbol)
+
+riscv_control_flow_relocation("BRANCH").
+riscv_control_flow_relocation("JAL").
+riscv_control_flow_relocation("RVC_BRANCH").
+riscv_control_flow_relocation("RVC_JUMP").
+
+.decl riscv_relocation_target(EA:address,Dest:address)
+
+riscv_relocation_target(EA,Dest):-
+    relocation(EA,Type,Symbol,Addend,SymbolIndex,_,_),
+    riscv_control_flow_relocation(Type),
+    symbol(SymAddr,_,_,_,_,_,_,SymbolIndex,Symbol),
+    Dest = as(as(SymAddr,number)+Addend,address).
+
+/**
+RISC-V far calls and tail calls are commonly encoded as AUIPC plus JALR/JR.
+Once code is moved, the raw JALR immediate no longer points at the original
+target, so recover the split PC-relative transfer as a symbolic pair.  This is
+the control-flow analogue of AUIPC/ADDI address materialization.
+*/
+.decl riscv_pcrel_control_transfer(EAHi:address,EALo:address,IndexLo:operand_index,Dest:address)
+
+direct_call(EA,Dest):-
+    arch.call(EA,_),
+    riscv_relocation_target(EA,Dest).
+
+direct_call(EA,as(as(EA,number)+Offset,address)):-
+    arch.call(EA,Index),
+    instruction_get_op(EA,Index,Op),
+    op_immediate(Op,Offset,_),
+    !riscv_pcrel_control_transfer(_,EA,_,_),
+    !instruction_has_relocation(EA,_).
+
+direct_jump(EA,Dest):-
+    arch.jump(EA),
+    riscv_relocation_target(EA,Dest).
+
+direct_jump(EA,as(as(EA,number)+Offset,address)):-
+    arch.jump(EA),
+    instruction_get_operation(EA,Operation),
+    arch.jump_operation_op_index(Operation,Index),
+    instruction_get_op(EA,Index,Op),
+    op_immediate(Op,Offset,_),
+    !riscv_pcrel_control_transfer(_,EA,_,_),
+    !instruction_has_relocation(EA,_).
+
+direct_call(EALo,Dest):-
+    arch.call(EALo,_),
+    riscv_pcrel_control_transfer(_,EALo,_,Dest).
+
+direct_jump(EALo,Dest):-
+    arch.jump(EALo),
+    riscv_pcrel_control_transfer(_,EALo,_,Dest).
+
+/**
+RISC-V PLT entries materialize the GOT slot through AUIPC plus a load before
+the final indirect JALR:
+
+    auipc reg, %pcrel_hi(.got.plt entry)
+    ld    reg, %pcrel_lo(.)(reg)
+    jalr  ..., reg
+*/
+.decl riscv_plt_got_entry(EA:address,GotEntry:address)
+
+riscv_plt_got_entry(EAJump,GotEntry):-
+    plt_section(SecName),
+    loaded_section(Beg,End,SecName),
+    EAAuipc >= Beg,
+    EAAuipc < End,
+
+    op_immediate_and_reg(EAAuipc,"AUIPC",Reg,_,Upper),
+    riscv_signed_hi20(Upper,SignedUpper),
+    next(EAAuipc,EALoad),
+
+    arch.load(EALoad,_,_,Reg,Reg,"NONE",_,Offset),
+    next(EALoad,EAJump),
+
+    (
+        reg_jump(EAJump,Reg);
+        reg_call(EAJump,Reg)
+    ),
+    GotEntry = as(as(EAAuipc,number)+(SignedUpper bshl 12)+Offset,address).
+
+plt_entry(EAJump,Function):-
+    riscv_plt_got_entry(EAJump,GotEntry),
+    relocation(GotEntry,_,Function,_,_,_,_),
+    Function != "".
+
+/**
+AUIPC materializes PC-relative pages.  In linked executables, local AUIPC/ADDI
+and AUIPC/load pairs often no longer have text relocations, so recover the
+split address as a symbolic operand just like ARM64 ADRP split loads.
+*/
+.decl riscv_signed_hi20(Imm:number,Signed:number) inline
+
+riscv_signed_hi20(Imm,Imm):-
+    Imm < 0x80000.
+
+riscv_signed_hi20(Imm,Imm - 0x100000):-
+    Imm >= 0x80000.
+
+.decl riscv_auipc(EA:address,Reg:register,Base:address)
+
+riscv_auipc(EA,Reg,Base):-
+    instruction_get_operation(EA,"AUIPC"),
+    instruction_get_op(EA,1,ImmOp),
+    op_immediate(ImmOp,Upper,_),
+    riscv_signed_hi20(Upper,SignedUpper),
+    instruction_get_op(EA,2,RegOp),
+    op_regdirect_contains_reg(RegOp,Reg),
+    Base = as(as(EA,number)+(SignedUpper bshl 12),address).
+
+riscv_pcrel_control_transfer(EAHi,EALo,2,Dest):-
+    riscv_auipc(EAHi,Reg,Base),
+    next(EAHi,EALo),
+    instruction_get_operation(EALo,"JALR"),
+    instruction_get_op(EALo,2,ImmOp),
+    op_immediate(ImmOp,Offset,_),
+    instruction_get_op(EALo,3,RegOp),
+    op_regdirect_contains_reg(RegOp,Reg),
+    Dest = as(as(Base,number)+Offset,address).
+
+riscv_pcrel_control_transfer(EAHi,EALo,2,Dest):-
+    riscv_auipc(EAHi,Reg,Base),
+    next(EAHi,EALo),
+    instruction_get_operation(EALo,"JR"),
+    instruction_get_op(EALo,2,ImmOp),
+    op_immediate(ImmOp,Offset,_),
+    instruction_get_op(EALo,1,RegOp),
+    op_regdirect_contains_reg(RegOp,Reg),
+    Dest = as(as(Base,number)+Offset,address).
+
+.decl riscv_lui(EA:address,Reg:register,Base:address)
+
+riscv_lui(EA,Reg,as(SignedUpper bshl 12,address)):-
+    op_immediate_and_reg(EA,"LUI",Reg,_,Upper),
+    riscv_signed_hi20(Upper,SignedUpper).
+
+riscv_lui(EA,Reg,as(SignedUpper bshl 12,address)):-
+    op_immediate_and_reg(EA,"C.LUI",Reg,_,Upper),
+    riscv_signed_hi20(Upper,SignedUpper).
+
+.decl riscv_split_load(EAHi:address,EALo:address,IndexLo:operand_index,Dest:address)
+
+.decl riscv_split_load_zero_addi_alias(EAHi:address,EALo:address,Dest:address)
+
+riscv_split_load_zero_addi_alias(EAHi,EALo,Dest):-
+    riscv_auipc(EAHi,Reg,Dest),
+    next(EAHi,EALo),
+    instruction(EALo,4,_, "MV", OpSrc, OpDst, 0, 0, _, _),
+    op_regdirect_contains_reg(OpSrc,Reg),
+    op_regdirect_contains_reg(OpDst,Reg),
+    (
+        code(Dest)
+        ;
+        data_segment(Beg,End),
+        Dest >= Beg,
+        Dest <= End
+        ;
+        symbol(Dest,_,_,_,_,_,_,_,_),
+        Dest != 0
+        ;
+        bss_section_limits(Beg,End),
+        Dest >= Beg,
+        Dest <= End
+    ).
+
+riscv_split_load(EAHi,EALo,1,Dest):-
+    riscv_split_load_zero_addi_alias(EAHi,EALo,Dest).
+
+riscv_split_load(EAHi,EALo,2,Dest):-
+    riscv_auipc(EAHi,Reg,Base),
+    next(EAHi,EALo),
+    arch.reg_arithmetic_operation(EALo,_,Reg,1,Offset),
+    !arch.memory_access(_,EALo,_,_,_,_,_,_,_),
+    Dest = as(as(Base,number)+Offset,address),
+    (
+        code(Dest)
+        ;
+        data_segment(Beg,End),
+        Dest >= Beg,
+        Dest <= End
+        ;
+        symbol(Dest,_,_,_,_,_,_,_,_),
+        Dest != 0
+        ;
+        bss_section_limits(Beg,End),
+        Dest >= Beg,
+        Dest <= End
+    ).
+
+riscv_split_load(EAHi,EALo,IndexLo,Dest):-
+    riscv_auipc(EAHi,Reg,Base),
+    next(EAHi,EALo),
+    arch.memory_access("LOAD",EALo,IndexLo,_,_,Reg,"NONE",_,Offset),
+    Dest = as(as(Base,number)+Offset,address),
+    (
+        code(Dest)
+        ;
+        data_segment(Beg,End),
+        Dest >= Beg,
+        Dest <= End
+        ;
+        symbol(Dest,_,_,_,_,_,_,_,_),
+        Dest != 0
+        ;
+        bss_section_limits(Beg,End),
+        Dest >= Beg,
+        Dest <= End
+    ).
+
+riscv_split_load(EAHi,EALo,IndexLo,Dest):-
+    riscv_auipc(EAHi,Reg,Base),
+    next(EAHi,EALo),
+    arch.memory_access("STORE",EALo,_,IndexLo,_,Reg,"NONE",_,Offset),
+    Dest = as(as(Base,number)+Offset,address),
+    (
+        code(Dest)
+        ;
+        data_segment(Beg,End),
+        Dest >= Beg,
+        Dest <= End
+        ;
+        symbol(Dest,_,_,_,_,_,_,_,_),
+        Dest != 0
+        ;
+        bss_section_limits(Beg,End),
+        Dest >= Beg,
+        Dest <= End
+    ).
+
+.decl riscv_absolute_split_load(EAHi:address,EALo:address,IndexLo:operand_index,Dest:address)
+
+.decl riscv_absolute_split_load_zero_addi_alias(EAHi:address,EALo:address,Dest:address)
+
+riscv_absolute_split_load_zero_addi_alias(EAHi,EALo,Dest):-
+    binary_type("EXEC"),
+    riscv_lui(EAHi,Reg,Dest),
+    next(EAHi,EALo),
+    instruction(EALo,4,_, "MV", OpSrc, OpDst, 0, 0, _, _),
+    op_regdirect_contains_reg(OpSrc,Reg),
+    op_regdirect_contains_reg(OpDst,_),
+    (
+        code(Dest)
+        ;
+        data_segment(Beg,End),
+        Dest >= Beg,
+        Dest <= End
+        ;
+        symbol(Dest,_,_,_,_,_,_,_,_),
+        Dest != 0
+        ;
+        bss_section_limits(Beg,End),
+        Dest >= Beg,
+        Dest <= End
+    ).
+
+riscv_absolute_split_load(EAHi,EALo,1,Dest):-
+    riscv_absolute_split_load_zero_addi_alias(EAHi,EALo,Dest).
+
+riscv_absolute_split_load(EAHi,EALo,IndexLo,Dest):-
+    binary_type("EXEC"),
+    riscv_lui(EAHi,Reg,Base),
+    next(EAHi,EALo),
+    instruction_get_operation(EALo,Operation),
+    Operation != "ADDIW",
+    Operation != "C.ADDIW",
+    arch.reg_arithmetic_operation(EALo,_,Reg,1,Offset),
+    instruction_immediate_offset(EALo,IndexLo,_,_),
+    !arch.memory_access(_,EALo,_,_,_,_,_,_,_),
+    Dest = as(as(Base,number)+Offset,address),
+    (
+        code(Dest)
+        ;
+        data_segment(Beg,End),
+        Dest >= Beg,
+        Dest <= End
+        ;
+        bss_section_limits(Beg,End),
+        Dest >= Beg,
+        Dest <= End
+    ).
+
+riscv_absolute_split_load(EAHi,EALo,IndexLo,Dest):-
+    binary_type("EXEC"),
+    riscv_lui(EAHi,Reg,Base),
+    next(EAHi,EALo),
+    arch.memory_access("LOAD",EALo,IndexLo,_,_,Reg,"NONE",_,Offset),
+    Dest = as(as(Base,number)+Offset,address),
+    (
+        code(Dest)
+        ;
+        data_segment(Beg,End),
+        Dest >= Beg,
+        Dest <= End
+        ;
+        bss_section_limits(Beg,End),
+        Dest >= Beg,
+        Dest <= End
+    ).
+
+riscv_absolute_split_load(EAHi,EALo,IndexLo,Dest):-
+    binary_type("EXEC"),
+    riscv_lui(EAHi,Reg,Base),
+    next(EAHi,EALo),
+    arch.memory_access("STORE",EALo,_,IndexLo,_,Reg,"NONE",_,Offset),
+    Dest = as(as(Base,number)+Offset,address),
+    (
+        code(Dest)
+        ;
+        data_segment(Beg,End),
+        Dest >= Beg,
+        Dest <= End
+        ;
+        bss_section_limits(Beg,End),
+        Dest >= Beg,
+        Dest <= End
+    ).
+
+/**
+GOT references are encoded as AUIPC+load pairs.  The high relocation should
+name the final symbol through %got_pcrel_hi, while the low relocation should
+name the AUIPC site.
+*/
+.decl riscv_got_reference(GotEntry:address,Symbol:symbol,Addend:number)
+
+riscv_got_reference(GotEntry,Symbol,Addend):-
+    loaded_section(Beg,End,".got"),
+    GotEntry >= Beg,
+    GotEntry < End,
+    relocation(GotEntry,RelType,Symbol,Addend,_,_,_),
+    RelType != "RELATIVE",
+    Symbol != "",
+    !tls_index(GotEntry,_),
+    !tls_descriptor(GotEntry,_),
+    symbol(_,_,_,_,_,_,_,_,Symbol).
+
+riscv_got_reference(GotEntry,SymbolName,0):-
+    loaded_section(Beg,End,".got"),
+    GotEntry >= Beg,
+    GotEntry < End,
+    relocation(GotEntry,"RELATIVE","",Target,_,_,_),
+    Target != 0,
+    !tls_index(GotEntry,_),
+    !tls_descriptor(GotEntry,_),
+    symbol(as(Target,address),_,_,_,_,_,_,_,SymbolName).
+
+.decl riscv_split_load_got(EAHi:address,EALo:address,IndexLo:operand_index,Symbol:symbol,Addend:number)
+
+riscv_split_load_got(EAHi,EALo,IndexLo,Symbol,Addend):-
+    riscv_split_load(EAHi,EALo,IndexLo,GotEntry),
+    riscv_got_reference(GotEntry,Symbol,Addend).
+
+.decl riscv_global_pointer(GP:address)
+
+riscv_global_pointer(GP):-
+    symbol(GP,_,_,_,_,_,_,_,"__global_pointer$").
+
+.decl riscv_gp_reference(EA:address,Index:operand_index,Dest:address)
+
+.decl riscv_skipped_gp_target(Dest:address)
+
+riscv_skipped_gp_target(Dest):-
+    symbol(Dest,_,_,_,_,_,_,_,_),
+    loaded_section(Beg,End,".got"),
+    Dest >= Beg,
+    Dest < End.
+
+riscv_skipped_gp_target(Dest):-
+    symbol(Dest,_,_,_,_,_,_,_,_),
+    loaded_section(Beg,End,".got.plt"),
+    Dest >= Beg,
+    Dest < End.
+
+riscv_gp_reference(EA,Index,Dest):-
+    riscv_global_pointer(GP),
+    arch.memory_access(_,EA,Index,_,_,"GP","NONE",_,Offset),
+    Dest = as(as(GP,number)+Offset,address),
+    !riscv_skipped_gp_target(Dest),
+    (
+        data_segment(Beg,End),
+        Dest >= Beg,
+        Dest <= End
+        ;
+        bss_section_limits(Beg,End),
+        Dest >= Beg,
+        Dest <= End
+    ).
+
+riscv_gp_reference(EA,Index,Dest):-
+    riscv_global_pointer(GP),
+    arch.reg_arithmetic_operation(EA,_,"GP",1,Offset),
+    instruction_immediate_offset(EA,Index,_,_),
+    !arch.memory_access(_,EA,_,_,_,_,_,_,_),
+    !riscv_split_load(_,EA,_,_),
+    Dest = as(as(GP,number)+Offset,address),
+    !riscv_skipped_gp_target(Dest),
+    (
+        data_segment(Beg,End),
+        Dest >= Beg,
+        Dest <= End
+        ;
+        bss_section_limits(Beg,End),
+        Dest >= Beg,
+        Dest <= End
+    ).
+
+split_load_operand(EAHi,1,Dest):-
+    riscv_split_load(EAHi,_,_,Dest).
+
+split_load_operand(EALo,IndexLo,Dest):-
+    riscv_split_load(_,EALo,IndexLo,Dest).
+
+.decl riscv_pcrel_plt_call(EAHi:address,EALo:address,Symbol:symbol)
+
+riscv_pcrel_plt_call(EAHi,EALo,Symbol):-
+    arch.call(EALo,_),
+    riscv_pcrel_control_transfer(EAHi,EALo,_,Dest),
+    plt_block(Dest,Symbol),
+    Symbol != "".
+
+.decl riscv_pcrel_anchor_symbol(EAHi:address,Symbol:symbol)
+
+riscv_pcrel_anchor_symbol(EAHi,SymbolName):-
+    riscv_pcrel_control_transfer(EAHi,_,_,_),
+    SymbolName = cat(".L_pcrel_",@to_string_hex(EAHi)).
+
+inferred_symbol(EAHi,SymbolName,"LOCAL","DEFAULT","NONE","Beg"):-
+    riscv_pcrel_anchor_symbol(EAHi,SymbolName).
+
+custom_symbolic_expr_operand(EAHi,1):-
+    riscv_split_load(EAHi,_,_,_).
+
+custom_symbolic_expr_operand(EALo,IndexLo):-
+    riscv_split_load(_,EALo,IndexLo,_).
+
+custom_symbolic_expr_operand(EAHi,1):-
+    riscv_absolute_split_load(EAHi,_,_,_).
+
+custom_symbolic_expr_operand(EALo,IndexLo):-
+    riscv_absolute_split_load(_,EALo,IndexLo,_).
+
+custom_symbolic_expr_operand(EA,Index):-
+    instruction_get_operation(EA,Operation),
+    (
+        Operation = "LUI";
+        Operation = "C.LUI"
+    ),
+    instruction_get_op(EA,Index,Op),
+    op_immediate(Op,_,_).
+
+custom_symbolic_expr_operand(EA,Index):-
+    riscv_gp_reference(EA,Index,_).
+
+custom_symbolic_expr_operand(EAHi,1):-
+    riscv_pcrel_control_transfer(EAHi,_,_,_).
+
+custom_symbolic_expr_operand(EALo,IndexLo):-
+    riscv_pcrel_control_transfer(_,EALo,IndexLo,_).
+
+labeled_ea(EAHi):-
+    riscv_split_load(EAHi,_,_,_).
+
+labeled_ea(Dest):-
+    riscv_split_load(_,_,_,Dest).
+
+labeled_ea(Dest):-
+    riscv_absolute_split_load(_,_,_,Dest).
+
+labeled_ea(Dest):-
+    riscv_gp_reference(_,_,Dest).
+
+labeled_ea(EAHi):-
+    riscv_pcrel_control_transfer(EAHi,_,_,_).
+
+labeled_ea(Dest):-
+    riscv_pcrel_control_transfer(_,_,_,Dest).
+
+block_needs_splitting_at(EAHi):-
+    riscv_split_load(EAHi,_,_,_),
+    code_in_block(EAHi,Block),
+    EAHi != Block.
+
+block_must_not_merge(EAHi):-
+    riscv_split_load(EAHi,_,_,_).
+
+block_needs_splitting_at(EAHi):-
+    riscv_pcrel_control_transfer(EAHi,_,_,_),
+    code_in_block(EAHi,Block),
+    EAHi != Block.
+
+block_must_not_merge(EAHi):-
+    riscv_pcrel_control_transfer(EAHi,_,_,_).
+
+.decl riscv_split_load_section_end(EAHi:address,EALo:address,Dest:address)
+
+.decl riscv_materialized_address_def(EA:address,Reg:register,Dest:address)
+
+riscv_materialized_address_def(EA,Reg,Dest):-
+    symbolic_operand(EA,_,Dest,"data"),
+    reg_def_use.def(EA,Reg).
+
+riscv_materialized_address_def(EALo,Reg,Dest):-
+    riscv_split_load(EAHi,EALo,_,Dest),
+    riscv_auipc(EAHi,Reg,_).
+
+riscv_materialized_address_def(EALo,Reg,Dest):-
+    riscv_absolute_split_load(EAHi,EALo,_,Dest),
+    riscv_lui(EAHi,Reg,_).
+
+riscv_split_load_section_end(EAHi,EALo,Dest):-
+    riscv_split_load(EAHi,EALo,_,Dest),
+    loaded_section(Beg,Dest,_),
+    reg_def_use.def_used(EALo,EndReg,EASub,_),
+    arch.reg_reg_arithmetic_operation(EASub,_,EndReg,StartReg,-1,0),
+    reg_def_use.def_used(EAStart,StartReg,EASub,_),
+    riscv_materialized_address_def(EAStart,StartReg,Start),
+    Start >= Beg,
+    Start < Dest.
+
+symbolic_expr(EAHi+InstrOffset,Size,Symbol,0):-
+    riscv_pcrel_plt_call(EAHi,_,Symbol),
+    instruction_immediate_offset(EAHi,1,InstrOffset,Size),
+    !symbolic_expr_from_relocation(EAHi+InstrOffset,_,_,_,_),
+    !symbol_minus_symbol_from_relocation(EAHi+InstrOffset,_,_,_,_,_),
+    !symbol_minus_symbol(EAHi+InstrOffset,_,_,_,_,_).
+
+symbolic_expr(EAHi+InstrOffset,Size,SymbolName,Offset):-
+    riscv_pcrel_control_transfer(EAHi,EALo,_,Dest),
+    !riscv_pcrel_plt_call(EAHi,EALo,_),
+    instruction_immediate_offset(EAHi,1,InstrOffset,Size),
+    !symbolic_expr_from_relocation(EAHi+InstrOffset,_,_,_,_),
+    !symbol_minus_symbol_from_relocation(EAHi+InstrOffset,_,_,_,_,_),
+    !symbol_minus_symbol(EAHi+InstrOffset,_,_,_,_,_),
+    (
+        moved_label(EAHi,1,Dest,FinalDest),
+        Offset = as(Dest,number) - as(FinalDest,number)
+        ;
+        !moved_label(EAHi,1,Dest,_),
+        FinalDest = Dest,
+        Offset = 0
+    ),
+    (
+        boundary_sym_expr(EAHi+InstrOffset,FinalDest), SymbolLoc = "End"
+        ;
+        !boundary_sym_expr(EAHi+InstrOffset,FinalDest), SymbolLoc = "Beg"
+    ),
+    best_symexpr_symbol(FinalDest,SymbolName,SymbolLoc).
+
+symbolic_expr(EALo+InstrOffset,Size,SymbolName,0):-
+    riscv_pcrel_control_transfer(EAHi,EALo,IndexLo,_),
+    !riscv_pcrel_plt_call(EAHi,EALo,_),
+    instruction_immediate_offset(EALo,IndexLo,InstrOffset,Size),
+    !symbolic_expr_from_relocation(EALo+InstrOffset,_,_,_,_),
+    !symbol_minus_symbol_from_relocation(EALo+InstrOffset,_,_,_,_,_),
+    !symbol_minus_symbol(EALo+InstrOffset,_,_,_,_,_),
+    riscv_pcrel_anchor_symbol(EAHi,SymbolName).
+
+symbolic_expr(EAHi+InstrOffset,Size,Symbol,Addend):-
+    riscv_split_load_got(EAHi,_,_,Symbol,Addend),
+    instruction_immediate_offset(EAHi,1,InstrOffset,Size),
+    !symbolic_expr_from_relocation(EAHi+InstrOffset,_,_,_,_),
+    !symbol_minus_symbol_from_relocation(EAHi+InstrOffset,_,_,_,_,_),
+    !symbol_minus_symbol(EAHi+InstrOffset,_,_,_,_,_).
+
+symbolic_expr(EAHi+InstrOffset,Size,SymbolName,Offset):-
+    riscv_split_load(EAHi,_,_,Dest),
+    !riscv_split_load_got(EAHi,_,_,_,_),
+    instruction_immediate_offset(EAHi,1,InstrOffset,Size),
+    !symbolic_expr_from_relocation(EAHi+InstrOffset,_,_,_,_),
+    !symbol_minus_symbol_from_relocation(EAHi+InstrOffset,_,_,_,_,_),
+    !symbol_minus_symbol(EAHi+InstrOffset,_,_,_,_,_),
+    (
+        moved_label(EAHi,1,Dest,FinalDest),
+        Offset = as(Dest,number) - as(FinalDest,number)
+        ;
+        !moved_label(EAHi,1,Dest,_),
+        FinalDest = Dest,
+        Offset = 0
+    ),
+    (
+        (
+            boundary_sym_expr(EAHi+InstrOffset,FinalDest);
+            riscv_split_load_section_end(EAHi,_,FinalDest)
+        ), SymbolLoc = "End"
+        ;
+        !boundary_sym_expr(EAHi+InstrOffset,FinalDest),
+        !riscv_split_load_section_end(EAHi,_,FinalDest),
+        SymbolLoc = "Beg"
+    ),
+    best_symexpr_symbol(FinalDest,SymbolName,SymbolLoc).
+
+symbolic_expr(EAHi+InstrOffset,Size,SymbolName,Offset):-
+    riscv_absolute_split_load(EAHi,_,_,Dest),
+    instruction_immediate_offset(EAHi,1,InstrOffset,Size),
+    !symbolic_expr_from_relocation(EAHi+InstrOffset,_,_,_,_),
+    !symbol_minus_symbol_from_relocation(EAHi+InstrOffset,_,_,_,_,_),
+    !symbol_minus_symbol(EAHi+InstrOffset,_,_,_,_,_),
+    (
+        moved_label(EAHi,1,Dest,FinalDest),
+        Offset = as(Dest,number) - as(FinalDest,number)
+        ;
+        !moved_label(EAHi,1,Dest,_),
+        FinalDest = Dest,
+        Offset = 0
+    ),
+    (
+        boundary_sym_expr(EAHi+InstrOffset,FinalDest), SymbolLoc = "End"
+        ;
+        !boundary_sym_expr(EAHi+InstrOffset,FinalDest), SymbolLoc = "Beg"
+    ),
+    best_symexpr_symbol(FinalDest,SymbolName,SymbolLoc).
+
+symbolic_expr(EALo+InstrOffset,Size,SymbolName,0):-
+    riscv_split_load(EAHi,EALo,IndexLo,_),
+    (
+        instruction_immediate_offset(EALo,IndexLo,InstrOffset,Size);
+        instruction_displacement_offset(EALo,IndexLo,InstrOffset,Size)
+    ),
+    !symbolic_expr_from_relocation(EALo+InstrOffset,_,_,_,_),
+    !symbol_minus_symbol_from_relocation(EALo+InstrOffset,_,_,_,_,_),
+    !symbol_minus_symbol(EALo+InstrOffset,_,_,_,_,_),
+    best_symexpr_symbol(EAHi,SymbolName,"Beg").
+
+symbolic_expr(EALo,4,SymbolName,0):-
+    riscv_split_load_zero_addi_alias(EAHi,EALo,_),
+    !symbolic_expr_from_relocation(EALo,_,_,_,_),
+    !symbol_minus_symbol_from_relocation(EALo,_,_,_,_,_),
+    !symbol_minus_symbol(EALo,_,_,_,_,_),
+    best_symexpr_symbol(EAHi,SymbolName,"Beg").
+
+symbolic_expr_attribute(EALo,"PCREL"):-
+    riscv_split_load_zero_addi_alias(_,EALo,_).
+
+symbolic_expr_attribute(EALo,"LO"):-
+    riscv_split_load_zero_addi_alias(_,EALo,_).
+
+symbolic_expr(EALo,4,SymbolName,0):-
+    riscv_absolute_split_load_zero_addi_alias(_,EALo,Dest),
+    !symbolic_expr_from_relocation(EALo,_,_,_,_),
+    !symbol_minus_symbol_from_relocation(EALo,_,_,_,_,_),
+    !symbol_minus_symbol(EALo,_,_,_,_,_),
+    (
+        boundary_sym_expr(EALo,Dest), SymbolLoc = "End"
+        ;
+        !boundary_sym_expr(EALo,Dest), SymbolLoc = "Beg"
+    ),
+    best_symexpr_symbol(Dest,SymbolName,SymbolLoc).
+
+symbolic_expr_attribute(EALo,"LO"):-
+    riscv_absolute_split_load_zero_addi_alias(_,EALo,_).
+
+symbolic_expr(EALo+InstrOffset,Size,SymbolName,0):-
+    riscv_absolute_split_load(_,EALo,IndexLo,Dest),
+    (
+        instruction_immediate_offset(EALo,IndexLo,InstrOffset,Size);
+        instruction_displacement_offset(EALo,IndexLo,InstrOffset,Size)
+    ),
+    !symbolic_expr_from_relocation(EALo+InstrOffset,_,_,_,_),
+    !symbol_minus_symbol_from_relocation(EALo+InstrOffset,_,_,_,_,_),
+    !symbol_minus_symbol(EALo+InstrOffset,_,_,_,_,_),
+    (
+        boundary_sym_expr(EALo+InstrOffset,Dest), SymbolLoc = "End"
+        ;
+        !boundary_sym_expr(EALo+InstrOffset,Dest), SymbolLoc = "Beg"
+    ),
+    best_symexpr_symbol(Dest,SymbolName,SymbolLoc).
+
+symbolic_expr_symbol_minus_symbol(EA+InstrOffset,Size,"__global_pointer$",SymbolName,1,0):-
+    riscv_gp_reference(EA,Index,Dest),
+    (
+        instruction_immediate_offset(EA,Index,InstrOffset,Size);
+        instruction_displacement_offset(EA,Index,InstrOffset,Size)
+    ),
+    !symbolic_expr_from_relocation(EA+InstrOffset,_,_,_,_),
+    !symbol_minus_symbol_from_relocation(EA+InstrOffset,_,_,_,_,_),
+    !symbol_minus_symbol(EA+InstrOffset,_,_,_,_,_),
+    best_symexpr_symbol(Dest,SymbolName,"Beg").
+
+symbolic_operand_attribute(EAHi,1,"GOT"):-
+    riscv_split_load_got(EAHi,_,_,_,_).
+
+symbolic_operand_attribute(EAHi,1,"PLT"):-
+    riscv_pcrel_plt_call(EAHi,_,_).
+
+symbolic_operand_attribute(EAHi,1,"PCREL"),
+symbolic_operand_attribute(EAHi,1,"HI"):-
+    riscv_pcrel_control_transfer(EAHi,EALo,_,_),
+    !riscv_pcrel_plt_call(EAHi,EALo,_).
+
+symbolic_operand_attribute(EALo,IndexLo,"PCREL"),
+symbolic_operand_attribute(EALo,IndexLo,"LO"):-
+    riscv_pcrel_control_transfer(EAHi,EALo,IndexLo,_),
+    !riscv_pcrel_plt_call(EAHi,EALo,_).
+
+symbolic_operand_attribute(EAHi,1,"PCREL"),
+symbolic_operand_attribute(EAHi,1,"HI"):-
+    riscv_split_load(EAHi,_,_,_),
+    !riscv_split_load_got(EAHi,_,_,_,_).
+
+symbolic_operand_attribute(EALo,IndexLo,"PCREL"),
+symbolic_operand_attribute(EALo,IndexLo,"LO"):-
+    riscv_split_load(_,EALo,IndexLo,_).
+
+symbolic_operand_attribute(EAHi,1,"HI"):-
+    riscv_absolute_split_load(EAHi,_,_,_).
+
+symbolic_operand_attribute(EALo,IndexLo,"LO"):-
+    riscv_absolute_split_load(_,EALo,IndexLo,_).
+
+symbolic_operand_attribute(EA,Index,"LO"):-
+    riscv_gp_reference(EA,Index,_).
+
+/**
+RV64 PIC code commonly uses 32-bit signed PC-relative jump-table entries:
+
+    auipc base, %pcrel_hi(table)
+    addi  base, base, %pcrel_lo(.)
+    slli  index, index, 2
+    add   addr, index, base
+    lw    target, 0(addr)
+    add   target, target, base
+    jr    target
+
+The table entries are offsets from the table base.  Recover the table start
+so the generic relative jump-table logic can symbolize each entry as
+target-table instead of preserving stale raw bytes.
+*/
+.decl riscv_relative_jump_table_access(EAJump:address,TableStart:address,EALoad:address,RegIndex:register)
+.decl riscv_relative_jump_table_base(EAJump:address,TableStart:address)
+.decl riscv_scale_index_by_4(EA:address,Reg:register)
+
+riscv_scale_index_by_4(EA,Reg):-
+    arch.reg_arithmetic_operation(EA,Reg,_,4,0).
+
+riscv_scale_index_by_4(EASrli,Reg):-
+    instruction(EASlli,_,_,"SLLI",OpSrc,OpSlliImm,OpSlliDst,0,_,_),
+    op_regdirect_contains_reg(OpSlliDst,RegTmp),
+    op_regdirect_contains_reg(OpSrc,_),
+    op_immediate(OpSlliImm,32,_),
+    reg_def_use.def_used(EASlli,RegTmp,EASrli,_),
+    instruction(EASrli,_,_,"SRLI",OpSrliSrc,OpSrliImm,OpSrliDst,0,_,_),
+    op_regdirect_contains_reg(OpSrliSrc,RegTmp),
+    op_regdirect_contains_reg(OpSrliDst,Reg),
+    op_immediate(OpSrliImm,30,_).
+
+riscv_scale_index_by_4(EASrli,Reg):-
+    instruction(EASlli,_,_,"C.SLLI",OpSlliImm,OpSlliReg,0,0,_,_),
+    op_regdirect_contains_reg(OpSlliReg,Reg),
+    op_immediate(OpSlliImm,32,_),
+    reg_def_use.def_used(EASlli,Reg,EASrli,_),
+    instruction(EASrli,_,_,"C.SRLI",OpSrliImm,OpSrliReg,0,0,_,_),
+    op_regdirect_contains_reg(OpSrliReg,Reg),
+    op_immediate(OpSrliImm,30,_).
+
+riscv_relative_jump_table_access(EAJump,TableStart,EALoad,RegIndexScaled):-
+    riscv_split_load(_,EABase,_,TableStart),
+    riscv_scale_index_by_4(EAScale,RegIndexScaled),
+    reg_def_use.def_used(EAScale,RegIndexScaled,EAAddr,_),
+    arch.reg_reg_arithmetic_operation(EAAddr,RegAddr,RegIndexScaled,RegBase,1,0),
+    RegBase != RegIndexScaled,
+    reg_def_use.def_used(EABase,RegBase,EAAddr,_),
+    reg_def_use.def_used(EAAddr,RegAddr,EALoad,_),
+    arch.memory_access("LOAD",EALoad,_,_,RegTarget,RegAddr,"NONE",1,0),
+    (
+        instruction_get_operation(EALoad,"LW");
+        instruction_get_operation(EALoad,"C.LW")
+    ),
+    data_access(EALoad,_,_,RegAddr,"NONE",1,0,4),
+    reg_def_use.def_used(EALoad,RegTarget,EAAdd,_),
+    arch.reg_reg_arithmetic_operation(EAAdd,RegJump,RegTarget,RegBase,1,0),
+    reg_def_use.def_used(EABase,RegBase,EAAdd,_),
+    reg_def_use.def_used(EAAdd,RegJump,EAJump,_),
+    reg_jump(EAJump,RegJump),
+    code(EAJump).
+
+riscv_relative_jump_table_base(EAJump,TableStart):-
+    riscv_relative_jump_table_access(EAJump,TableStart,_,_).
+
+jump_table_element_access(EALoad,4,TableStart,RegIndex):-
+    riscv_relative_jump_table_access(_,TableStart,EALoad,RegIndex).
+
+jump_table_signed(TableStart,1):-
+    riscv_relative_jump_table_access(_,TableStart,_,_).
+
+jump_table_start(EAJump,4,TableStart,TableStart,1):-
+    riscv_relative_jump_table_base(EAJump,TableStart).
+
+/**
+RV64 medlow code commonly uses 32-bit absolute code-address tables:
+
+    slli  index, index, 2
+    add   index, index, table_base
+    lw    target, 0(index)
+    jr    target
+
+The entries are not pointer-sized on RV64, so the generic absolute pointer
+symbolization does not see them.  Recover them only when the 4-byte load feeds
+an indirect control transfer.
+*/
+.decl riscv_absolute_jump_table_base(EAJump:address,TableStart:address)
+
+.decl riscv_absolute_jump_table_base_reg(EADef:address,RegBase:register,TableStart:address)
+
+riscv_absolute_jump_table_base_reg(EABase,RegBase,TableStart):-
+    riscv_absolute_split_load(_,EABase,_,TableStart),
+    arch.reg_arithmetic_operation(EABase,RegBase,RegBase,1,_).
+
+riscv_absolute_jump_table_base(EAJump,TableStart):-
+    riscv_absolute_jump_table_base_reg(EABase,RegBase,TableStart),
+    reg_def_use.def_used(EABase,RegBase,EAAdd,_),
+    arch.reg_reg_arithmetic_operation(EAAdd,RegAddr,RegBase,RegIndex,1,0),
+    RegIndex != RegBase,
+    reg_def_use.def_used(EAAdd,RegAddr,EALoad,_),
+    arch.memory_access("LOAD",EALoad,_,_,RegTarget,RegAddr,"NONE",1,0),
+    data_access(EALoad,_,_,RegAddr,"NONE",1,0,4),
+    reg_def_use.def_used(EALoad,RegTarget,EAJump,_),
+    (
+        reg_jump(EAJump,RegTarget);
+        reg_call(EAJump,RegTarget)
+    ).
+
+.decl riscv_absolute_jump_table_entry(EAJump:address,EntryEA:address,Dest:address)
+
+riscv_absolute_jump_table_entry(EAJump,TableStart,Dest):-
+    riscv_absolute_jump_table_base(EAJump,TableStart),
+    data_uword(TableStart,4,Target),
+    Dest = as(Target,address),
+    instruction(Dest,_,_,_,_,_,_,_,_,_).
+
+riscv_absolute_jump_table_entry(EAJump,EntryEA+4,Dest):-
+    riscv_absolute_jump_table_entry(EAJump,EntryEA,_),
+    data_segment(Beg,End),
+    EntryEA+4 >= Beg,
+    EntryEA+8 <= End,
+    !symbol(EntryEA+4,_,_,_,_,_,_,_,_),
+    data_uword(EntryEA+4,4,Target),
+    Dest = as(Target,address),
+    instruction(Dest,_,_,_,_,_,_,_,_,_).
+
+block_needs_splitting_at(Dest):-
+    riscv_absolute_jump_table_entry(_,_,Dest),
+    code_in_block(Dest,Block),
+    Dest != Block.
+
+labeled_ea(Dest):-
+    riscv_absolute_jump_table_entry(_,_,Dest).
+
+symbolic_expr(EntryEA,4,SymbolName,0):-
+    riscv_absolute_jump_table_entry(_,EntryEA,Dest),
+    best_symexpr_symbol(Dest,SymbolName,"Beg").
+
+/**
+Attributes used by the RISC-V pretty-printer to recover assembler relocation
+modifiers.
+*/
+symbolic_expr_attribute(EA,"HI"):-
+    relocation(EA,"HI20",_,_,_,_,_).
+
+symbolic_expr_attribute(EA,"GOT"):-
+    relocation(EA,"GOT_HI20",_,_,_,_,_).
+
+symbolic_expr_attribute(EA,"TLSGD"):-
+    relocation(EA,"TLS_GD_HI20",_,_,_,_,_).
+
+symbolic_expr_attribute(EA,"LO"):-
+    (
+        relocation(EA,"LO12_I",_,_,_,_,_);
+        relocation(EA,"LO12_S",_,_,_,_,_);
+        relocation(EA,"GPREL_I",_,_,_,_,_);
+        relocation(EA,"GPREL_S",_,_,_,_,_)
+    ).
+
+symbolic_expr_attribute(EA,"PCREL"),
+symbolic_expr_attribute(EA,"HI"):-
+    relocation(EA,"PCREL_HI20",_,_,_,_,_).
+
+symbolic_expr_attribute(EA,"PCREL"),
+symbolic_expr_attribute(EA,"LO"):-
+    (
+        relocation(EA,"PCREL_LO12_I",_,_,_,_,_);
+        relocation(EA,"PCREL_LO12_S",_,_,_,_,_)
+    ).
+
+symbolic_expr_attribute(EA,"TPREL"),
+symbolic_expr_attribute(EA,"HI"):-
+    relocation(EA,"TPREL_HI20",_,_,_,_,_).
+
+symbolic_expr_attribute(EA,"TPREL"),
+symbolic_expr_attribute(EA,"LO"):-
+    (
+        relocation(EA,"TPREL_LO12_I",_,_,_,_,_);
+        relocation(EA,"TPREL_LO12_S",_,_,_,_,_)
+    ).
+
+// RELATIVE relocations in RELA binaries encode the relocated target in the
+// addend.  The stored bytes are typically zero, so they must be symbolized from
+// relocation metadata rather than from the data value.
+symbolic_expr_from_relocation(EA,Size,"",0,as(Addend,address)):-
+    binary_format("ELF"),
+    arch.pointer_size(Size),
+    relocation(EA,"RELATIVE","",Addend,_,_,"RELA"),
+    Addend != 0.
+
+/**
+RISC-V relocations in executable code describe the instruction operand rather
+than an adjacent data object.  Preserve them as symbolic expressions at the
+instruction start so the assembly printer can emit symbolic operands instead of
+stale immediates or bytes.
+*/
+symbolic_expr_from_relocation(EA,Size,Symbol,Addend,Dest):-
+    binary_format("ELF"),
+    relocation(EA,Type,Symbol,Addend,SymbolIndex,_,"RELA"),
+    riscv_relocation_width(Type,Size),
+    Symbol != "",
+    !ambiguous_symbol(Symbol),
+    symbol(SymAddr,_,_,_,_,_,_,SymbolIndex,Symbol),
+    Dest = as(as(SymAddr,number)+Addend,address).
+
+// Duplicate local labels (for example assembler-generated .L0 symbols for
+// %pcrel_lo) must be selected by address, not by name.
+symbolic_expr_from_relocation(EA,Size,"",Addend,Dest):-
+    binary_format("ELF"),
+    relocation(EA,Type,Symbol,Addend,SymbolIndex,_,"RELA"),
+    riscv_relocation_width(Type,Size),
+    Symbol != "",
+    ambiguous_symbol(Symbol),
+    symbol(SymAddr,_,_,_,_,_,_,SymbolIndex,Symbol),
+    Dest = as(as(SymAddr,number)+Addend,address).

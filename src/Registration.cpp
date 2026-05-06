@@ -26,6 +26,7 @@
 #include "gtirb-decoder/target/ElfArm32Loader.h"
 #include "gtirb-decoder/target/ElfArm64Loader.h"
 #include "gtirb-decoder/target/ElfMips32Loader.h"
+#include "gtirb-decoder/target/ElfRiscVLoader.h"
 #include "gtirb-decoder/target/ElfX64Loader.h"
 #include "gtirb-decoder/target/ElfX86Loader.h"
 #include "gtirb-decoder/target/PeX64Loader.h"
@@ -33,6 +34,7 @@
 #include "gtirb-decoder/target/RawArm32Loader.h"
 #include "gtirb-decoder/target/RawArm64Loader.h"
 #include "gtirb-decoder/target/RawMips32Loader.h"
+#include "gtirb-decoder/target/RawRiscVLoader.h"
 #include "gtirb-decoder/target/RawX64Loader.h"
 #include "gtirb-decoder/target/RawX86Loader.h"
 #include "passes/DisassemblyPass.h"
@@ -122,6 +124,18 @@ void registerDatalogLoaders()
     // Register RAW-MIPS32-LE target.
     DisassemblyPass::registerLoader(
         {gtirb::FileFormat::RAW, gtirb::ISA::MIPS32, gtirb::ByteOrder::Little}, RawMips32LELoader);
+#endif
+
+#if defined(DDISASM_RISCV_32) || defined(DDISASM_RISCV_64)
+    // Register ELF-RISCV-LE target.
+    DisassemblyPass::registerLoader(
+        {gtirb::FileFormat::ELF, gtirb::ISA::ValidButUnsupported, gtirb::ByteOrder::Little},
+        ElfRiscVLoader);
+
+    // Register RAW-RISCV-LE target.
+    DisassemblyPass::registerLoader(
+        {gtirb::FileFormat::RAW, gtirb::ISA::ValidButUnsupported, gtirb::ByteOrder::Little},
+        RawRiscVLoader);
 #endif
 
 #if defined(DDISASM_X86_32)

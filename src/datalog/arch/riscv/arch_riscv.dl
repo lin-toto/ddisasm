@@ -1,0 +1,429 @@
+//===- arch_riscv.dl ----------------------------------------*- datalog -*-===//
+//
+//  Copyright (C) 2026 GrammaTech, Inc.
+//
+//  This code is licensed under the GNU Affero General Public License
+//  as published by the Free Software Foundation, either version 3 of
+//  the License, or (at your option) any later version. See the
+//  LICENSE.txt file in the project root for license terms or visit
+//  https://www.gnu.org/licenses/agpl.txt.
+//
+//  This program is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+//  GNU Affero General Public License for more details.
+//
+//===----------------------------------------------------------------------===//
+
+.comp RISCV : Arch {
+
+#include "jump_operations.dl"
+#include "interrupt_operations.dl"
+#include "float_operations.dl"
+#include "registers.dl"
+#include "memory_access.dl"
+
+move_operation("MV").
+move_operation("C.MV").
+move_operation("LI").
+move_operation("C.LI").
+
+.decl signed_hi20(Imm:number,Signed:number) inline
+
+signed_hi20(Imm,Imm):-
+    Imm < 0x80000.
+
+signed_hi20(Imm,Imm - 0x100000):-
+    Imm >= 0x80000.
+
+move_reg_imm(EA,Reg,Value,1):-
+    instruction(EA,_,_,Operation,Op1,Op2,0,0,_,_),
+    (
+        Operation = "LUI";
+        Operation = "C.LUI"
+    ),
+    op_immediate(Op1,Immediate,_),
+    signed_hi20(Immediate,SignedImmediate),
+    Value = SignedImmediate bshl 12,
+    op_regdirect_contains_reg(Op2,Reg).
+
+move_reg_imm(EA,Reg,0,1):-
+    zero_reg(Zero),
+    move_reg_reg(EA,Reg,Zero).
+
+move_reg_imm(EA,Reg,Immediate,1):-
+    zero_reg(Zero),
+    reg_arithmetic_operation(EA,Reg,Zero,_,Immediate).
+
+pc_relative_addr(EA,Reg,as(as(EA,number)+(SignedUpper bshl 12),address)):-
+    instruction_get_operation(EA,"AUIPC"),
+    instruction_get_op(EA,1,ImmOp),
+    op_immediate(ImmOp,Upper,_),
+    signed_hi20(Upper,SignedUpper),
+    instruction_get_op(EA,2,RegOp),
+    op_regdirect_contains_reg(RegOp,Reg).
+
+load_operation("LB").
+load_operation("LBU").
+load_operation("LH").
+load_operation("LHU").
+load_operation("LW").
+load_operation("LWU").
+load_operation("LD").
+load_operation("LQ").
+load_operation("FLW").
+load_operation("FLD").
+load_operation("C.LW").
+load_operation("C.LWSP").
+load_operation("C.LD").
+load_operation("C.LDSP").
+load_operation("C.FLW").
+load_operation("C.FLWSP").
+load_operation("C.FLD").
+load_operation("C.FLDSP").
+
+load_word_operation("LW").
+load_word_operation("C.LW").
+load_word_operation("C.LWSP").
+
+store_operation("SB").
+store_operation("SH").
+store_operation("SW").
+store_operation("SD").
+store_operation("SQ").
+store_operation("FSW").
+store_operation("FSD").
+store_operation("C.SW").
+store_operation("C.SWSP").
+store_operation("C.SD").
+store_operation("C.SDSP").
+store_operation("C.FSW").
+store_operation("C.FSWSP").
+store_operation("C.FSD").
+store_operation("C.FSDSP").
+
+.decl data_access_size_operation(Operation:symbol,Size:unsigned)
+
+data_access_size_operation("LB",1).
+data_access_size_operation("LBU",1).
+data_access_size_operation("SB",1).
+data_access_size_operation("LH",2).
+data_access_size_operation("LHU",2).
+data_access_size_operation("SH",2).
+data_access_size_operation("LW",4).
+data_access_size_operation("LWU",4).
+data_access_size_operation("SW",4).
+data_access_size_operation("FLW",4).
+data_access_size_operation("FSW",4).
+data_access_size_operation("C.LW",4).
+data_access_size_operation("C.LWSP",4).
+data_access_size_operation("C.SW",4).
+data_access_size_operation("C.SWSP",4).
+data_access_size_operation("C.FLW",4).
+data_access_size_operation("C.FLWSP",4).
+data_access_size_operation("C.FSW",4).
+data_access_size_operation("C.FSWSP",4).
+data_access_size_operation("LD",8).
+data_access_size_operation("SD",8).
+data_access_size_operation("FLD",8).
+data_access_size_operation("FSD",8).
+data_access_size_operation("C.LD",8).
+data_access_size_operation("C.LDSP",8).
+data_access_size_operation("C.SD",8).
+data_access_size_operation("C.SDSP",8).
+data_access_size_operation("C.FLD",8).
+data_access_size_operation("C.FLDSP",8).
+data_access_size_operation("C.FSD",8).
+data_access_size_operation("C.FSDSP",8).
+data_access_size_operation("LQ",16).
+data_access_size_operation("SQ",16).
+
+data_access_size(Operation,as(Reg,register),Size):-
+    data_access_size_operation(Operation,Size),
+    op_regdirect(_,Reg).
+
+is_nop(EA):-
+    instruction_get_operation(EA,"NOP").
+
+is_nop(EA):-
+    instruction_get_operation(EA,"C.NOP").
+
+syscall_operation("ECALL").
+
+halt_operation("EBREAK").
+halt_operation("C.EBREAK").
+
+return_operation("RET").
+
+return(EA):-
+    instruction_get_operation(EA,Operation),
+    (
+        Operation = "JR";
+        Operation = "C.JR"
+    ),
+    arch.jump_operation_op_index(Operation,Index),
+    instruction_get_op(EA,Index,Op),
+    op_regdirect_contains_reg(Op,"RA").
+
+cmp_operation(Operation):-
+    branch_operation(Operation,_).
+
+cmp_zero_operation("C.BEQZ").
+cmp_zero_operation("C.BNEZ").
+
+call_operation("JAL").
+call_operation("C.JAL").
+call_operation("JALR").
+call_operation("C.JALR").
+
+arithmetic_operation("ADD").
+arithmetic_operation("ADDI").
+arithmetic_operation("ADDIW").
+arithmetic_operation("ADDW").
+arithmetic_operation("SUB").
+arithmetic_operation("SUBW").
+arithmetic_operation("SLT").
+arithmetic_operation("SLTI").
+arithmetic_operation("SLTIU").
+arithmetic_operation("SLTU").
+arithmetic_operation("MUL").
+arithmetic_operation("MULH").
+arithmetic_operation("MULHSU").
+arithmetic_operation("MULHU").
+arithmetic_operation("MULW").
+arithmetic_operation("DIV").
+arithmetic_operation("DIVU").
+arithmetic_operation("DIVW").
+arithmetic_operation("DIVUW").
+arithmetic_operation("REM").
+arithmetic_operation("REMU").
+arithmetic_operation("REMW").
+arithmetic_operation("REMUW").
+arithmetic_operation("LUI").
+arithmetic_operation("AUIPC").
+arithmetic_operation("C.ADD").
+arithmetic_operation("C.ADDI").
+arithmetic_operation("C.ADDI4SPN").
+arithmetic_operation("C.ADDI16SP").
+arithmetic_operation("C.ADDIW").
+arithmetic_operation("C.ADDW").
+arithmetic_operation("C.LUI").
+arithmetic_operation("C.SUB").
+arithmetic_operation("C.SUBW").
+
+multiplication_operation("MUL").
+multiplication_operation("MULH").
+multiplication_operation("MULHSU").
+multiplication_operation("MULHU").
+multiplication_operation("MULW").
+multiplication_operation("SLL").
+multiplication_operation("SLLI").
+multiplication_operation("SLLIW").
+multiplication_operation("SLLW").
+multiplication_operation("C.SLLI").
+
+shift_rotate_operation("SLL").
+shift_rotate_operation("SLLI").
+shift_rotate_operation("SLLIW").
+shift_rotate_operation("SLLW").
+shift_rotate_operation("SRA").
+shift_rotate_operation("SRAI").
+shift_rotate_operation("SRAIW").
+shift_rotate_operation("SRAW").
+shift_rotate_operation("SRL").
+shift_rotate_operation("SRLI").
+shift_rotate_operation("SRLIW").
+shift_rotate_operation("SRLW").
+shift_rotate_operation("C.SLLI").
+shift_rotate_operation("C.SRAI").
+shift_rotate_operation("C.SRLI").
+
+logic_operation("AND").
+logic_operation("ANDI").
+logic_operation("OR").
+logic_operation("ORI").
+logic_operation("XOR").
+logic_operation("XORI").
+logic_operation("C.AND").
+logic_operation("C.ANDI").
+logic_operation("C.OR").
+logic_operation("C.XOR").
+
+.decl in_place_operation(Operation:symbol)
+
+in_place_operation("C.ADD").
+in_place_operation("C.ADDI").
+in_place_operation("C.ADDI16SP").
+in_place_operation("C.ADDIW").
+in_place_operation("C.ADDW").
+in_place_operation("C.AND").
+in_place_operation("C.ANDI").
+in_place_operation("C.OR").
+in_place_operation("C.SLLI").
+in_place_operation("C.SRAI").
+in_place_operation("C.SRLI").
+in_place_operation("C.SUB").
+in_place_operation("C.SUBW").
+in_place_operation("C.XOR").
+
+// ADDI <Dst> <Src> <Immediate>
+reg_arithmetic_operation(EA,Dst,Src,1,Immediate):-
+    instruction(EA,_,_,Operation,Op1,Op2,Op3,0,_,_),
+    (
+        Operation = "ADDI";
+        Operation = "ADDIW"
+    ),
+    op_regdirect_contains_reg(Op3,Dst),
+    op_regdirect_contains_reg(Op1,Src),
+    op_immediate(Op2,Immediate,_).
+
+// Compressed add-immediate instructions update their register operand.
+reg_arithmetic_operation(EA,Dst,Dst,1,Immediate):-
+    instruction(EA,_,_,Operation,Op1,Op2,0,0,_,_),
+    (
+        Operation = "C.ADDI";
+        Operation = "C.ADDI16SP";
+        Operation = "C.ADDIW"
+    ),
+    op_regdirect_contains_reg(Op2,Dst),
+    op_immediate(Op1,Immediate,_).
+
+reg_arithmetic_operation(EA,Dst,"SP",1,Immediate):-
+    instruction(EA,_,_,"C.ADDI4SPN",Op1,Op2,0,0,_,_),
+    op_regdirect_contains_reg(Op2,Dst),
+    op_immediate(Op1,Immediate,_).
+
+// SLLI <Dst> <Src> <Immediate>
+reg_arithmetic_operation(EA,Dst,Src,2^Immediate,0):-
+    instruction(EA,_,_,Operation,Op1,Op2,Op3,0,_,_),
+    (
+        Operation = "SLLI";
+        Operation = "SLLIW"
+    ),
+    op_regdirect_contains_reg(Op3,Dst),
+    op_regdirect_contains_reg(Op1,Src),
+    op_immediate(Op2,Immediate,_).
+
+reg_arithmetic_operation(EA,Dst,Dst,2^Immediate,0):-
+    instruction(EA,_,_,"C.SLLI",Op1,Op2,0,0,_,_),
+    op_regdirect_contains_reg(Op2,Dst),
+    op_immediate(Op1,Immediate,_).
+
+// ADD/SUB <Dst> <Src1> <Src2>
+reg_reg_arithmetic_operation(EA,Dst,Src1,Src2,Sign,0):-
+    instruction(EA,_,_,Operation,Op1,Op2,Op3,0,_,_),
+    (
+        Operation = "ADD", Sign = 1;
+        Operation = "ADDW", Sign = 1;
+        Operation = "SUB", Sign = -1;
+        Operation = "SUBW", Sign = -1
+    ),
+    op_regdirect_contains_reg(Op3,Dst),
+    op_regdirect_contains_reg(Op1,Src1),
+    op_regdirect_contains_reg(Op2,Src2).
+
+reg_reg_arithmetic_operation(EA,Dst,Dst,Src,Sign,0):-
+    instruction(EA,_,_,Operation,Op1,Op2,0,0,_,_),
+    (
+        Operation = "C.ADD", Sign = 1;
+        Operation = "C.ADDW", Sign = 1;
+        Operation = "C.SUB", Sign = -1;
+        Operation = "C.SUBW", Sign = -1
+    ),
+    op_regdirect_contains_reg(Op2,Dst),
+    op_regdirect_contains_reg(Op1,Src).
+
+reg_reg_bitwise_binary_op(EA,Dst,Src1,Src2,Op):-
+    instruction(EA,_,_,Operation,Op1,Op2,Op3,0,_,_),
+    (
+        Operation = "AND", Op = "AND";
+        Operation = "OR", Op = "OR";
+        Operation = "XOR", Op = "XOR"
+    ),
+    op_regdirect_contains_reg(Op3,Dst),
+    op_regdirect_contains_reg(Op1,Src1),
+    op_regdirect_contains_reg(Op2,Src2).
+
+reg_imm_bitwise_binary_op(EA,Dst,Src,Imm,Op):-
+    instruction(EA,_,_,Operation,Op1,Op2,Op3,0,_,_),
+    (
+        Operation = "ANDI", Op = "AND";
+        Operation = "ORI", Op = "OR";
+        Operation = "XORI", Op = "XOR"
+    ),
+    op_regdirect_contains_reg(Op3,Dst),
+    op_regdirect_contains_reg(Op1,Src),
+    op_immediate(Op2,Imm,_).
+
+// Capstone 5.0.1 does not support register/operand access metadata for
+// RISC-V, so we model operand access here.
+
+op_access_override(EA,Index,"R",1):-
+    arch.memory_access(_,EA,Index,_,_,_,_,_,_).
+
+op_access_override(EA,Index,"R",1):-
+    instruction_get_operation(EA,Operation),
+    arch.jump_operation(Operation),
+    instruction_get_op(EA,Index,_).
+
+op_access_override(EA,Index,"R",1):-
+    (
+        instruction(EA,_,_,Operation,Op,_,_,_,_,_), Op != 0, Index = 1;
+        instruction(EA,_,_,Operation,_,Op,Op3,_,_,_), Op != 0, Op3 != 0, Index = 2;
+        instruction(EA,_,_,Operation,_,_,Op,Op4,_,_), Op != 0, Op4 != 0, Index = 3
+        ;
+        instruction_get_operation(EA,Operation),
+        in_place_operation(Operation),
+        (
+            instruction(EA,_,_,Operation,_,Op,0,0,_,_), Op != 0, Index = 2;
+            instruction(EA,_,_,Operation,_,_,Op,0,_,_), Op != 0, Index = 3;
+            instruction(EA,_,_,Operation,_,_,_,Op,_,_), Op != 0, Index = 4
+        )
+    ),
+    instruction_get_operation(EA,Operation),
+    !arch.memory_access(_,EA,_,_,_,_,_,_,_),
+    !arch.jump_operation(Operation).
+
+op_access_override(EA,DstIndex,"W",1):-
+    arch.memory_access(_,EA,_,DstIndex,_,_,_,_,_).
+
+op_access_override(EA,Index,"W",1):-
+    instruction_get_operation(EA,Operation),
+    !arch.memory_access(_,EA,_,_,_,_,_,_,_),
+    !arch.jump_operation(Operation),
+    (
+        instruction(EA,_,_,Operation,_,Op2,Op3,Op4,_,_),
+        Op4 = 0,
+        Op3 = 0,
+        Op2 != 0,
+        Index = 2
+        ;
+        instruction(EA,_,_,Operation,_,_,Op3,Op4,_,_),
+        Op4 = 0,
+        Op3 != 0,
+        Index = 3
+        ;
+        instruction(EA,_,_,Operation,_,_,_,Op4,_,_),
+        Op4 != 0,
+        Index = 4
+    ).
+
+register_access_override(EA,Reg,Access,1):-
+    op_access_override(EA,Index,Access,1),
+    instruction_get_op(EA,Index,Op),
+    op_regdirect_contains_reg(Op,Reg).
+
+register_access_override(EA,Reg,"R",1):-
+    instruction_get_op(EA,_,Op),
+    op_indirect_contains_reg(Op,Reg).
+
+register_access_override(EA,"RA","W",1):-
+    instruction(EA,_,_,Operation,_,0,0,0,_,_),
+    (
+        Operation = "JAL";
+        Operation = "C.JAL";
+        Operation = "JALR";
+        Operation = "C.JALR"
+    ).
+
+}

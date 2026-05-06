@@ -650,6 +650,22 @@ void buildSymbolicExpr(gtirb::Module &Module, const gtirb::Addr &Ea,
     }
 }
 
+bool hasSymbolicExpr(const SymbolicInfo &SymbolicInfo, const gtirb::Addr &Ea)
+{
+    return SymbolicInfo.SymbolicExprs.find(Ea) != SymbolicInfo.SymbolicExprs.end()
+           || SymbolicInfo.SymbolMinusSymbolSymbolicExprs.find(Ea)
+                  != SymbolicInfo.SymbolMinusSymbolSymbolicExprs.end();
+}
+
+void buildSymbolicExprOnce(gtirb::Module &Module, const gtirb::Addr &Ea,
+                           const SymbolicInfo &SymbolicInfo, std::set<gtirb::Addr> &Built)
+{
+    if(Built.insert(Ea).second)
+    {
+        buildSymbolicExpr(Module, Ea, SymbolicInfo);
+    }
+}
+
 void buildCodeSymbolicInformation(gtirb::Module &Module, souffle::SouffleProgram &Program)
 {
     std::set<gtirb::Addr> Code;
@@ -669,6 +685,7 @@ void buildCodeSymbolicInformation(gtirb::Module &Module, souffle::SouffleProgram
     std::map<gtirb::Addr, DecodedInstruction> decodedInstructions =
         recoverInstructions(Program, Code);
 
+    std::set<gtirb::Addr> BuiltSymbolicExprs;
     for(auto &EA : Code)
     {
         const auto Inst = decodedInstructions.find(EA);
@@ -676,12 +693,22 @@ void buildCodeSymbolicInformation(gtirb::Module &Module, souffle::SouffleProgram
         for(auto &Op : Inst->second.Operands)
         {
             if(std::get_if<ImmOp>(&Op.second))
-                buildSymbolicExpr(Module, gtirb::Addr(Inst->first + Inst->second.immediateOffset),
-                                  symbolicInfo);
+            {
+                buildSymbolicExprOnce(
+                    Module, gtirb::Addr(Inst->first + Inst->second.immediateOffset), symbolicInfo,
+                    BuiltSymbolicExprs);
+            }
             if(std::get_if<IndirectOp>(&Op.second))
-                buildSymbolicExpr(Module,
-                                  gtirb::Addr(Inst->first + Inst->second.displacementOffset),
-                                  symbolicInfo);
+            {
+                buildSymbolicExprOnce(
+                    Module, gtirb::Addr(Inst->first + Inst->second.displacementOffset),
+                    symbolicInfo, BuiltSymbolicExprs);
+            }
+        }
+
+        if(hasSymbolicExpr(symbolicInfo, Inst->first))
+        {
+            buildSymbolicExprOnce(Module, Inst->first, symbolicInfo, BuiltSymbolicExprs);
         }
     }
 }

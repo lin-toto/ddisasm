@@ -110,6 +110,8 @@ Convert between input_reg and register with arch.reg_map
 #elif defined(ARCH_MIPS32)
     #include "arch/mips_symbolization.dl"
     #include "arch/mips_tls.dl"
+#elif defined(ARCH_RISCV32) || defined(ARCH_RISCV64)
+    #include "arch/riscv_symbolization.dl"
 #else
     #error "Undefined architecture"
 #endif
@@ -488,6 +490,14 @@ pc_relative_operand(EA,Index,Dest):-
 
 split_load_operand(0,0,0):- false.
 
+/**
+Architecture-specific symbolic operands that provide their own symbolic_expr
+rules instead of using the generic target-address rule.
+*/
+.decl custom_symbolic_expr_operand(src:address,index:operand_index)
+
+custom_symbolic_expr_operand(0,0):- false.
+
 .decl instruction_has_loop_prefix(EA:address)
 
 instruction_has_loop_prefix(EA):-
@@ -533,6 +543,8 @@ not produce a direct_jump term.
 .decl direct_jump(src:address, dest:address)
 
 direct_jump(EA,as(Dest,address)):-
+    !binary_isa("RISCV32"),
+    !binary_isa("RISCV64"),
     arch.jump(EA),
     instruction_get_operation(EA,Operation),
     arch.jump_operation_op_index(Operation,Index),
@@ -547,6 +559,8 @@ direct_jump(EA,as(Dest,address)):-
     ).
 
 direct_jump(EA,as(Dest,address)):-
+    !binary_isa("RISCV32"),
+    !binary_isa("RISCV64"),
     arch.jump(EA),
     instruction_immediate_offset(EA,_,_,_),
     instruction_has_relocation(EA,Rel),
@@ -613,6 +627,8 @@ not produce a direct_call term.
 
 direct_call(EA,as(Dest,address)):-
     !binary_isa("ARM"),
+    !binary_isa("RISCV32"),
+    !binary_isa("RISCV64"),
     arch.call(EA,Index),
     instruction_get_op(EA,Index,Op),
     op_immediate(Op,Dest,_),
@@ -626,6 +642,8 @@ direct_call(EA,as(Dest,address)):-
 
 direct_call(EA,Dest):-
     !binary_isa("ARM"),
+    !binary_isa("RISCV32"),
+    !binary_isa("RISCV64"),
     arch.call(EA,_),
     instruction_immediate_offset(EA,_,_,_),
     instruction_has_relocation(EA,Rel),

@@ -46,11 +46,17 @@ public:
 
     // Loader factory registration.
     using Target = std::tuple<gtirb::FileFormat, gtirb::ISA, gtirb::ByteOrder>;
-    using Factory = std::function<CompositeLoader()>;
+    using Factory = std::function<CompositeLoader(const gtirb::Module&)>;
+    using SimpleFactory = std::function<CompositeLoader()>;
 
     static void registerLoader(Target T, Factory F)
     {
         loaders()[T] = F;
+    }
+
+    static void registerLoader(Target T, SimpleFactory F)
+    {
+        loaders()[T] = [F](const gtirb::Module&) { return F(); };
     }
 
 protected:

@@ -1,0 +1,55 @@
+//===- jump_operations.dl -----------------------------------*- datalog -*-===//
+//
+//  Copyright (C) 2026 GrammaTech, Inc.
+//
+//  This code is licensed under the GNU Affero General Public License
+//  as published by the Free Software Foundation, either version 3 of
+//  the License, or (at your option) any later version. See the
+//  LICENSE.txt file in the project root for license terms or visit
+//  https://www.gnu.org/licenses/agpl.txt.
+//
+//===----------------------------------------------------------------------===//
+
+.decl branch_operation(Operation:symbol,CC:condition_code)
+.decl branch_operation_3op(Operation:symbol)
+
+branch_operation("BEQ","E").
+branch_operation("BEQZ","E").
+branch_operation("BNE","NE").
+branch_operation("BNEZ","NE").
+branch_operation("BLT","L").
+branch_operation("BLTZ","L").
+branch_operation("BGE","GE").
+branch_operation("BGEZ","GE").
+branch_operation("BLTU","B").
+branch_operation("BGEU","AE").
+branch_operation("BLEZ","LE").
+branch_operation("BGTZ","G").
+branch_operation("C.BEQZ","E").
+branch_operation("C.BNEZ","NE").
+
+branch_operation_3op("BEQ").
+branch_operation_3op("BNE").
+branch_operation_3op("BLT").
+branch_operation_3op("BGE").
+branch_operation_3op("BLTU").
+branch_operation_3op("BGEU").
+
+jump_operation("J").
+jump_operation("C.J").
+jump_operation("JR").
+jump_operation("C.JR").
+
+jump_operation(Operation),
+conditional_operation(Operation,CC):-
+    branch_operation(Operation,CC).
+
+jump_operation_op_index(Operation,2):-
+    branch_operation_3op(Operation).
+
+jump_operation_op_index(Operation,1):-
+    jump_operation(Operation),
+    !branch_operation_3op(Operation).
+
+call_operation_op_index(Operation,1):-
+    call_operation(Operation).

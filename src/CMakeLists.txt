@@ -374,6 +374,50 @@ if(DDISASM_MIPS_32)
     souffle_disasm_mips32)
 endif()
 
+set(DATALOG_RISCV_SOURCES
+    datalog/arch/riscv_symbolization.dl
+    datalog/arch/riscv/arch_riscv.dl
+    datalog/arch/riscv/float_operations.dl
+    datalog/arch/riscv/interrupt_operations.dl
+    datalog/arch/riscv/jump_operations.dl
+    datalog/arch/riscv/memory_access.dl
+    datalog/arch/riscv/registers.dl
+    datalog/arch/riscv/elf_relocations.dl)
+
+if(DDISASM_RISCV_32)
+  add_definitions(-DDDISASM_RISCV_32)
+
+  set(DATALOG_RISCV32_SOURCES datalog/arch/riscv/arch_riscv32.dl
+                              ${DATALOG_RISCV_SOURCES})
+
+  generate_arch_static_lib(
+    ARCH
+    RISCV32
+    MARCH
+    RISCV32
+    DATALOG_SOURCES
+    ${DATALOG_RISCV32_SOURCES}
+    PATH
+    souffle_disasm_riscv32)
+endif()
+
+if(DDISASM_RISCV_64)
+  add_definitions(-DDDISASM_RISCV_64)
+
+  set(DATALOG_RISCV64_SOURCES datalog/arch/riscv/arch_riscv64.dl
+                              ${DATALOG_RISCV_SOURCES})
+
+  generate_arch_static_lib(
+    ARCH
+    RISCV64
+    MARCH
+    RISCV64
+    DATALOG_SOURCES
+    ${DATALOG_RISCV64_SOURCES}
+    PATH
+    souffle_disasm_riscv64)
+endif()
+
 if(DDISASM_X86_32)
   add_definitions(-DDDISASM_X86_32)
 

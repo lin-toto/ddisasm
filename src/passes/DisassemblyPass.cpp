@@ -24,6 +24,7 @@
 
 #include "../gtirb-decoder/CompositeLoader.h"
 #include "../gtirb-decoder/Relations.h"
+#include "../gtirb-decoder/arch/RiscVUtil.h"
 #include "../gtirb-decoder/core/ModuleLoader.h"
 #include "Disassembler.h"
 
@@ -40,10 +41,19 @@ void DisassemblyPass::loadImpl(AnalysisPassResult& Result, const gtirb::Context&
     auto Factories = loaders();
     if(auto It = Factories.find(Target); It != Factories.end())
     {
-        auto Loader = (It->second)();
-        Program = Loader.load(Module);
+        if(Module.getISA() == gtirb::ISA::ValidButUnsupported
+           && getRiscVXLen(Module) == RiscVXLen::Unknown)
+        {
+            It = Factories.end();
+        }
+        else
+        {
+            auto Loader = (It->second)(Module);
+            Program = Loader.load(Module);
+        }
     }
-    else
+
+    if(!Program)
     {
         std::stringstream StrBuilder;
         StrBuilder << Module.getName() << ": "
@@ -60,11 +70,14 @@ void DisassemblyPass::loadImpl(AnalysisPassResult& Result, const gtirb::Context&
         Result.Errors.push_back(StrBuilder.str());
     }
 
-    if(NoCfiDirectives)
+    if(Program)
     {
-        std::vector<std::string> Options;
-        Options.push_back("no-cfi-directives");
-        relations::insert(*Program, "option", Options);
+        if(NoCfiDirectives)
+        {
+            std::vector<std::string> Options;
+            Options.push_back("no-cfi-directives");
+            relations::insert(*Program, "option", Options);
+        }
     }
 }
 

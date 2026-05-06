@@ -32,6 +32,8 @@
 #include <boost/process/search_path.hpp>
 #include <boost/process/system.hpp>
 
+#include "../gtirb-decoder/arch/RiscVUtil.h"
+
 std::string getInterpreterArch(const gtirb::Module &Module)
 {
     switch(Module.getISA())
@@ -46,6 +48,17 @@ std::string getInterpreterArch(const gtirb::Module &Module)
             return "-MARCH_ARM64";
         case gtirb::ISA::MIPS32:
             return "-MARCH_MIPS32";
+        case gtirb::ISA::ValidButUnsupported:
+            switch(getRiscVXLen(Module))
+            {
+                case RiscVXLen::RV32:
+                    return "-MARCH_RISCV32";
+                case RiscVXLen::RV64:
+                    return "-MARCH_RISCV64";
+                case RiscVXLen::Unknown:
+                    break;
+            }
+            [[fallthrough]];
         default:
             assert(!"Unsupported GTIRB ISA");
     }

@@ -26,6 +26,7 @@
 #include "../../AuxDataSchema.h"
 #include "../../Endian.h"
 #include "../Relations.h"
+#include "../arch/RiscVUtil.h"
 
 void ElfDynamicEntryLoader(const gtirb::Module &Module, souffle::SouffleProgram &Program)
 {
@@ -128,6 +129,11 @@ ElfExceptionDecoder::ElfExceptionDecoder(const gtirb::Module &module)
         case gtirb::ISA::MIPS32:
         {
             ptrsize = 4;
+            break;
+        }
+        case gtirb::ISA::ValidButUnsupported:
+        {
+            ptrsize = (getRiscVXLen(module) == RiscVXLen::RV32) ? 4 : 8;
             break;
         }
         default:

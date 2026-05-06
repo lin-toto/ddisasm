@@ -3,6 +3,8 @@
 #include <boost/filesystem.hpp>
 #include <gtirb/gtirb.hpp>
 
+#include <optional>
+
 #include "../AuxDataSchema.h"
 #include "../Registration.h"
 #include "../passes/DisassemblyPass.h"
@@ -17,7 +19,8 @@ struct GTIRB
     DisassemblyPass Disassembler;
 };
 
-GTIRB buildGtirb(gtirb::ISA ISA, std::vector<uint8_t> &Bytes)
+GTIRB buildGtirb(gtirb::ISA ISA, std::vector<uint8_t> &Bytes,
+                 std::optional<std::string> ArchISA = std::nullopt)
 {
     registerDatalogLoaders();
 
@@ -33,6 +36,13 @@ GTIRB buildGtirb(gtirb::ISA ISA, std::vector<uint8_t> &Bytes)
     std::vector<std::string> BinaryType;
     BinaryType.emplace_back("EXEC");
     Module->addAuxData<gtirb::schema::BinaryType>(std::move(BinaryType));
+
+    if(ArchISA)
+    {
+        std::map<std::string, std::string> ArchInfo;
+        ArchInfo["ISA"] = *ArchISA;
+        Module->addAuxData<gtirb::schema::ArchInfo>(std::move(ArchInfo));
+    }
 
     uint64_t Addr = 0x10000;
 
@@ -330,4 +340,126 @@ TEST(ArchMemoryAccessRelation, Arm32)
     };
 
     EXPECT_EQ(Count, ExpectedMemoryAccesses.size());
+}
+
+TEST(ArchMemoryAccessRelation, RiscV32)
+{
+    std::unordered_set<MemoryAccess, Hash> ExpectedMemoryAccesses = {
+        {"LOAD", 0x10000, 1, 2, "A0", "SP", "NONE", 1, 8},
+        {"STORE", 0x10004, 2, 1, "A0", "SP", "NONE", 1, 12},
+    };
+
+    std::vector<uint8_t> Bytes = {
+        0x03, 0x25, 0x81, 0x00, // 0x10000: lw a0, 8(sp)
+        0x23, 0x26, 0xA1, 0x00, // 0x10004: sw a0, 12(sp)
+        0x67, 0x80, 0x00, 0x00  // ret - satisfy code/data inference.
+    };
+    GTIRB Gtirb = buildGtirb(gtirb::ISA::ValidButUnsupported, Bytes, "RISCV32");
+    runSouffle(Gtirb);
+    souffle::SouffleProgram &Program = Gtirb.Disassembler.getProgram();
+
+    unsigned int Count = 0;
+    for(auto &output : *Program.getRelation("arch.memory_access"))
+    {
+        MemoryAccess Result;
+
+        output >> Result.Type >> Result.Addr >> Result.SrcOp >> Result.DstOp >> Result.DirectReg
+            >> Result.BaseReg >> Result.IndexReg >> Result.Mult >> Result.Offset;
+
+        SCOPED_TRACE(Result);
+
+        auto It = ExpectedMemoryAccesses.find(Result);
+        EXPECT_FALSE(It == ExpectedMemoryAccesses.end());
+        Count++;
+    };
+
+    EXPECT_EQ(Count, ExpectedMemoryAccesses.size());
+}
+
+TEST(ArchMemoryAccessRelation, RiscV64)
+{
+    std::unordered_set<MemoryAccess, Hash> ExpectedMemoryAccesses = {
+        {"LOAD", 0x10000, 1, 2, "A0", "SP", "NONE", 1, 16},
+        {"STORE", 0x10004, 2, 1, "A0", "SP", "NONE", 1, 24},
+    };
+
+    std::vector<uint8_t> Bytes = {
+        0x03, 0x35, 0x01, 0x01, // 0x10000: ld a0, 16(sp)
+        0x23, 0x3C, 0xA1, 0x00, // 0x10004: sd a0, 24(sp)
+        0x67, 0x80, 0x00, 0x00  // ret - satisfy code/data inference.
+    };
+    GTIRB Gtirb = buildGtirb(gtirb::ISA::ValidButUnsupported, Bytes, "RISCV64");
+    runSouffle(Gtirb);
+    souffle::SouffleProgram &Program = Gtirb.Disassembler.getProgram();
+
+    unsigned int Count = 0;
+    for(auto &output : *Program.getRelation("arch.memory_access"))
+    {
+        MemoryAccess Result;
+
+        output >> Result.Type >> Result.Addr >> Result.SrcOp >> Result.DstOp >> Result.DirectReg
+            >> Result.BaseReg >> Result.IndexReg >> Result.Mult >> Result.Offset;
+
+        SCOPED_TRACE(Result);
+
+        auto It = ExpectedMemoryAccesses.find(Result);
+        EXPECT_FALSE(It == ExpectedMemoryAccesses.end());
+        Count++;
+    };
+
+    EXPECT_EQ(Count, ExpectedMemoryAccesses.size());
+}
+
+TEST(InstructionRelation, RiscVCompressed)
+{
+    std::vector<uint8_t> Bytes = {
+        0x01, 0x00,             // 0x10000: c.nop
+        0x13, 0x05, 0x10, 0x00, // 0x10002: addi a0, zero, 1
+        0x67, 0x80, 0x00, 0x00  // ret - satisfy code/data inference.
+    };
+    GTIRB Gtirb = buildGtirb(gtirb::ISA::ValidButUnsupported, Bytes, "RISCV32");
+    runSouffle(Gtirb);
+    souffle::SouffleProgram &Program = Gtirb.Disassembler.getProgram();
+
+    bool FoundCompressed = false;
+    bool FoundUncompressed = false;
+    bool FoundMiddleInstruction = false;
+    bool FoundReturn = false;
+    for(auto &output : *Program.getRelation("instruction"))
+    {
+        uint64_t Addr;
+        uint64_t Size;
+        std::string Prefix;
+        std::string Opcode;
+        uint64_t Op1, Op2, Op3, Op4;
+        uint64_t ImmOffset, DisplacementOffset;
+
+        output >> Addr >> Size >> Prefix >> Opcode >> Op1 >> Op2 >> Op3 >> Op4 >> ImmOffset
+            >> DisplacementOffset;
+
+        if(Addr == 0x10000)
+        {
+            FoundCompressed = true;
+            EXPECT_EQ(Size, 2);
+        }
+        if(Addr == 0x10002)
+        {
+            FoundUncompressed = true;
+            EXPECT_EQ(Size, 4);
+        }
+        if(Addr == 0x10004)
+        {
+            FoundMiddleInstruction = true;
+        }
+        if(Addr == 0x10006)
+        {
+            FoundReturn = true;
+            EXPECT_EQ(Size, 4);
+        }
+    }
+
+    EXPECT_TRUE(FoundCompressed);
+    EXPECT_TRUE(FoundUncompressed);
+    EXPECT_FALSE(FoundMiddleInstruction);
+    EXPECT_TRUE(FoundReturn);
 }

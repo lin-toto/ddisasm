@@ -51,6 +51,7 @@
 // First we split blocks if there is a symbol pointing to the middle
 
 .decl block_needs_splitting_at(EA:address)
+.decl block_must_not_merge(Block:address)
 .decl code_in_split_block(ea:address,block:address)
 .decl split_block(block:address)
 
@@ -116,6 +117,7 @@ block_needs_merging(Block):-
     !fde_addresses(Block,_),
     !fde_addresses(_,Block),
     !block_needs_splitting_at(Block),
+    !block_must_not_merge(Block),
     !loaded_section(_,Block,_).
 
 refined_block(Block):-

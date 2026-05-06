@@ -1127,6 +1127,7 @@ symbolic_expr_symbol_minus_symbol(EA,Size,SymbolName1,SymbolName2,Scale,FinalOff
 // Symbolic operands
 symbolic_expr(EA+InstrOffset,Size,SymbolName,Offset):-
     moved_label(EA,Index,Dest,FinalDest),
+    !custom_symbolic_expr_operand(EA,Index),
     (
         instruction_immediate_offset(EA,Index,InstrOffset,Size);
         instruction_displacement_offset(EA,Index,InstrOffset,Size)
@@ -1139,6 +1140,7 @@ symbolic_expr(EA+InstrOffset,Size,SymbolName,Offset):-
 
 symbolic_expr(EA+InstrOffset,Size,SymbolName,0):-
     symbolic_operand(EA,Index,Dest,_),
+    !custom_symbolic_expr_operand(EA,Index),
     !moved_label(EA,Index,_,_),
     (
         instruction_immediate_offset(EA,Index,InstrOffset,Size);

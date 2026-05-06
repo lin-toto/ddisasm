@@ -17,6 +17,8 @@ ARCHITECTURES = [
     "ARCH_AMD64",
     "ARCH_ARM32",
     "ARCH_MIPS32",
+    "ARCH_RISCV32",
+    "ARCH_RISCV64",
 ]
 
 

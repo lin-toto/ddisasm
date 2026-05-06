@@ -1,0 +1,136 @@
+//===- elf_relocations.dl -----------------------------------*- datalog -*-===//
+//
+//  Copyright (C) 2026 GrammaTech, Inc.
+//
+//  This code is licensed under the GNU Affero General Public License
+//  as published by the Free Software Foundation, either version 3 of
+//  the License, or (at your option) any later version. See the
+//  LICENSE.txt file in the project root for license terms or visit
+//  https://www.gnu.org/licenses/agpl.txt.
+//
+//===----------------------------------------------------------------------===//
+
+/**
+Table maps RISC-V ELF relocation types to a size in bits.
+*/
+
+elf_relocation_size("RISCV32", "NONE",                 0).
+elf_relocation_size("RISCV64", "NONE",                 0).
+elf_relocation_size("RISCV32", "R32",                 32).
+elf_relocation_size("RISCV64", "R32",                 32).
+elf_relocation_size("RISCV32", "R64",                 64).
+elf_relocation_size("RISCV64", "R64",                 64).
+elf_relocation_size("RISCV32", "RELATIVE",            32).
+elf_relocation_size("RISCV64", "RELATIVE",            64).
+elf_relocation_size("RISCV32", "COPY",                32).
+elf_relocation_size("RISCV64", "COPY",                64).
+elf_relocation_size("RISCV32", "JUMP_SLOT",           32).
+elf_relocation_size("RISCV64", "JUMP_SLOT",           64).
+elf_relocation_size("RISCV32", "TLS_DTPMOD32",        32).
+elf_relocation_size("RISCV64", "TLS_DTPMOD32",        32).
+elf_relocation_size("RISCV32", "TLS_DTPMOD64",        64).
+elf_relocation_size("RISCV64", "TLS_DTPMOD64",        64).
+elf_relocation_size("RISCV32", "TLS_DTPREL32",        32).
+elf_relocation_size("RISCV64", "TLS_DTPREL32",        32).
+elf_relocation_size("RISCV32", "TLS_DTPREL64",        64).
+elf_relocation_size("RISCV64", "TLS_DTPREL64",        64).
+elf_relocation_size("RISCV32", "TLS_TPREL32",         32).
+elf_relocation_size("RISCV64", "TLS_TPREL32",         32).
+elf_relocation_size("RISCV32", "TLS_TPREL64",         64).
+elf_relocation_size("RISCV64", "TLS_TPREL64",         64).
+elf_relocation_size("RISCV32", "TLSDESC",             32).
+elf_relocation_size("RISCV64", "TLSDESC",             64).
+elf_relocation_size("RISCV32", "BRANCH",              12).
+elf_relocation_size("RISCV64", "BRANCH",              12).
+elf_relocation_size("RISCV32", "JAL",                 20).
+elf_relocation_size("RISCV64", "JAL",                 20).
+elf_relocation_size("RISCV32", "CALL",                32).
+elf_relocation_size("RISCV64", "CALL",                32).
+elf_relocation_size("RISCV32", "CALL_PLT",            32).
+elf_relocation_size("RISCV64", "CALL_PLT",            32).
+elf_relocation_size("RISCV32", "GOT_HI20",            20).
+elf_relocation_size("RISCV64", "GOT_HI20",            20).
+elf_relocation_size("RISCV32", "GPREL_I",             12).
+elf_relocation_size("RISCV64", "GPREL_I",             12).
+elf_relocation_size("RISCV32", "GPREL_S",             12).
+elf_relocation_size("RISCV64", "GPREL_S",             12).
+elf_relocation_size("RISCV32", "TLS_GOT_HI20",        20).
+elf_relocation_size("RISCV64", "TLS_GOT_HI20",        20).
+elf_relocation_size("RISCV32", "TLS_GD_HI20",         20).
+elf_relocation_size("RISCV64", "TLS_GD_HI20",         20).
+elf_relocation_size("RISCV32", "PCREL_HI20",          20).
+elf_relocation_size("RISCV64", "PCREL_HI20",          20).
+elf_relocation_size("RISCV32", "PCREL_LO12_I",        12).
+elf_relocation_size("RISCV64", "PCREL_LO12_I",        12).
+elf_relocation_size("RISCV32", "PCREL_LO12_S",        12).
+elf_relocation_size("RISCV64", "PCREL_LO12_S",        12).
+elf_relocation_size("RISCV32", "HI20",                20).
+elf_relocation_size("RISCV64", "HI20",                20).
+elf_relocation_size("RISCV32", "LO12_I",              12).
+elf_relocation_size("RISCV64", "LO12_I",              12).
+elf_relocation_size("RISCV32", "LO12_S",              12).
+elf_relocation_size("RISCV64", "LO12_S",              12).
+elf_relocation_size("RISCV32", "TPREL_HI20",          20).
+elf_relocation_size("RISCV64", "TPREL_HI20",          20).
+elf_relocation_size("RISCV32", "TPREL_LO12_I",        12).
+elf_relocation_size("RISCV64", "TPREL_LO12_I",        12).
+elf_relocation_size("RISCV32", "TPREL_LO12_S",        12).
+elf_relocation_size("RISCV64", "TPREL_LO12_S",        12).
+elf_relocation_size("RISCV32", "TPREL_ADD",            0).
+elf_relocation_size("RISCV64", "TPREL_ADD",            0).
+elf_relocation_size("RISCV32", "ADD8",                 8).
+elf_relocation_size("RISCV64", "ADD8",                 8).
+elf_relocation_size("RISCV32", "ADD16",               16).
+elf_relocation_size("RISCV64", "ADD16",               16).
+elf_relocation_size("RISCV32", "ADD32",               32).
+elf_relocation_size("RISCV64", "ADD32",               32).
+elf_relocation_size("RISCV32", "ADD64",               64).
+elf_relocation_size("RISCV64", "ADD64",               64).
+elf_relocation_size("RISCV32", "SUB8",                 8).
+elf_relocation_size("RISCV64", "SUB8",                 8).
+elf_relocation_size("RISCV32", "SUB16",               16).
+elf_relocation_size("RISCV64", "SUB16",               16).
+elf_relocation_size("RISCV32", "SUB32",               32).
+elf_relocation_size("RISCV64", "SUB32",               32).
+elf_relocation_size("RISCV32", "SUB64",               64).
+elf_relocation_size("RISCV64", "SUB64",               64).
+elf_relocation_size("RISCV32", "GOT32_PCREL",         32).
+elf_relocation_size("RISCV64", "GOT32_PCREL",         32).
+elf_relocation_size("RISCV32", "ALIGN",                0).
+elf_relocation_size("RISCV64", "ALIGN",                0).
+elf_relocation_size("RISCV32", "RVC_BRANCH",           8).
+elf_relocation_size("RISCV64", "RVC_BRANCH",           8).
+elf_relocation_size("RISCV32", "RVC_JUMP",            11).
+elf_relocation_size("RISCV64", "RVC_JUMP",            11).
+elf_relocation_size("RISCV32", "RVC_LUI",              6).
+elf_relocation_size("RISCV64", "RVC_LUI",              6).
+elf_relocation_size("RISCV32", "RELAX",                0).
+elf_relocation_size("RISCV64", "RELAX",                0).
+elf_relocation_size("RISCV32", "SUB6",                 6).
+elf_relocation_size("RISCV64", "SUB6",                 6).
+elf_relocation_size("RISCV32", "SET6",                 6).
+elf_relocation_size("RISCV64", "SET6",                 6).
+elf_relocation_size("RISCV32", "SET8",                 8).
+elf_relocation_size("RISCV64", "SET8",                 8).
+elf_relocation_size("RISCV32", "SET16",               16).
+elf_relocation_size("RISCV64", "SET16",               16).
+elf_relocation_size("RISCV32", "SET32",               32).
+elf_relocation_size("RISCV64", "SET32",               32).
+elf_relocation_size("RISCV32", "R32_PCREL",           32).
+elf_relocation_size("RISCV64", "R32_PCREL",           32).
+elf_relocation_size("RISCV32", "IRELATIVE",           32).
+elf_relocation_size("RISCV64", "IRELATIVE",           64).
+elf_relocation_size("RISCV32", "PLT32",               32).
+elf_relocation_size("RISCV64", "PLT32",               32).
+elf_relocation_size("RISCV32", "SET_ULEB128",          0).
+elf_relocation_size("RISCV64", "SET_ULEB128",          0).
+elf_relocation_size("RISCV32", "SUB_ULEB128",          0).
+elf_relocation_size("RISCV64", "SUB_ULEB128",          0).
+elf_relocation_size("RISCV32", "TLSDESC_HI20",        20).
+elf_relocation_size("RISCV64", "TLSDESC_HI20",        20).
+elf_relocation_size("RISCV32", "TLSDESC_LOAD_LO12",   12).
+elf_relocation_size("RISCV64", "TLSDESC_LOAD_LO12",   12).
+elf_relocation_size("RISCV32", "TLSDESC_ADD_LO12",    12).
+elf_relocation_size("RISCV64", "TLSDESC_ADD_LO12",    12).
+elf_relocation_size("RISCV32", "TLSDESC_CALL",         0).
+elf_relocation_size("RISCV64", "TLSDESC_CALL",         0).

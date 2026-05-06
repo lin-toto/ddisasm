@@ -1,0 +1,23 @@
+//===- arch_riscv32.dl --------------------------------------*- datalog -*-===//
+//
+//  Copyright (C) 2026 GrammaTech, Inc.
+//
+//  This code is licensed under the GNU Affero General Public License
+//  as published by the Free Software Foundation, either version 3 of
+//  the License, or (at your option) any later version. See the
+//  LICENSE.txt file in the project root for license terms or visit
+//  https://www.gnu.org/licenses/agpl.txt.
+//
+//===----------------------------------------------------------------------===//
+#include "arch_riscv.dl"
+
+.comp RISCV32 : RISCV {
+
+arch("RISCV32").
+pointer_size(4).
+
+register_size_bytes(InputReg,4):-
+    general_purpose_reg(Reg),
+    reg_map(InputReg,Reg).
+
+}
