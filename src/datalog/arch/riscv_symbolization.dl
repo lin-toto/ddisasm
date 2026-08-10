@@ -309,6 +309,8 @@ riscv_split_load(EAHi,EALo,IndexLo,Dest):-
 
 .decl riscv_absolute_split_load(EAHi:address,EALo:address,IndexLo:operand_index,Dest:address)
 
+.decl riscv_symbolic_absolute_split_load(EAHi:address,EALo:address,IndexLo:operand_index,Dest:address)
+
 .decl riscv_absolute_split_load_zero_addi_alias(EAHi:address,EALo:address,Dest:address)
 
 riscv_absolute_split_load_zero_addi_alias(EAHi,EALo,Dest):-
@@ -358,6 +360,13 @@ riscv_absolute_split_load(EAHi,EALo,IndexLo,Dest):-
         Dest >= Beg,
         Dest <= End
     ).
+
+// Unlike AUIPC, LUI can materialize either an address or an integer constant.
+// Route absolute split-load candidates through the generic symbolization score
+// before emitting a symbolic expression.
+riscv_symbolic_absolute_split_load(EAHi,EALo,IndexLo,Dest):-
+    riscv_absolute_split_load(EAHi,EALo,IndexLo,Dest),
+    symbolic_operand(EAHi,1,Dest,_).
 
 riscv_absolute_split_load(EAHi,EALo,IndexLo,Dest):-
     binary_type("EXEC"),
@@ -489,6 +498,12 @@ split_load_operand(EAHi,1,Dest):-
 split_load_operand(EALo,IndexLo,Dest):-
     riscv_split_load(_,EALo,IndexLo,Dest).
 
+split_load_operand(EAHi,1,Dest):-
+    riscv_absolute_split_load(EAHi,_,_,Dest).
+
+split_load_operand(EALo,IndexLo,Dest):-
+    riscv_absolute_split_load(_,EALo,IndexLo,Dest).
+
 .decl riscv_pcrel_plt_call(EAHi:address,EALo:address,Symbol:symbol)
 
 riscv_pcrel_plt_call(EAHi,EALo,Symbol):-
@@ -543,7 +558,7 @@ labeled_ea(Dest):-
     riscv_split_load(_,_,_,Dest).
 
 labeled_ea(Dest):-
-    riscv_absolute_split_load(_,_,_,Dest).
+    riscv_symbolic_absolute_split_load(_,_,_,Dest).
 
 labeled_ea(Dest):-
     riscv_gp_reference(_,_,Dest).
@@ -583,7 +598,7 @@ riscv_materialized_address_def(EALo,Reg,Dest):-
     riscv_auipc(EAHi,Reg,_).
 
 riscv_materialized_address_def(EALo,Reg,Dest):-
-    riscv_absolute_split_load(EAHi,EALo,_,Dest),
+    riscv_symbolic_absolute_split_load(EAHi,EALo,_,Dest),
     riscv_lui(EAHi,Reg,_).
 
 riscv_split_load_section_end(EAHi,EALo,Dest):-
@@ -619,9 +634,9 @@ symbolic_expr(EAHi+InstrOffset,Size,SymbolName,Offset):-
         Offset = 0
     ),
     (
-        boundary_sym_expr(EAHi+InstrOffset,FinalDest), SymbolLoc = "End"
+        boundary_sym_expr(EAHi+InstrOffset,FinalDest,_), SymbolLoc = "End"
         ;
-        !boundary_sym_expr(EAHi+InstrOffset,FinalDest), SymbolLoc = "Beg"
+        !boundary_sym_expr(EAHi+InstrOffset,FinalDest,_), SymbolLoc = "Beg"
     ),
     best_symexpr_symbol(FinalDest,SymbolName,SymbolLoc).
 
@@ -658,18 +673,18 @@ symbolic_expr(EAHi+InstrOffset,Size,SymbolName,Offset):-
     ),
     (
         (
-            boundary_sym_expr(EAHi+InstrOffset,FinalDest);
+            boundary_sym_expr(EAHi+InstrOffset,FinalDest,_);
             riscv_split_load_section_end(EAHi,_,FinalDest)
         ), SymbolLoc = "End"
         ;
-        !boundary_sym_expr(EAHi+InstrOffset,FinalDest),
+        !boundary_sym_expr(EAHi+InstrOffset,FinalDest,_),
         !riscv_split_load_section_end(EAHi,_,FinalDest),
         SymbolLoc = "Beg"
     ),
     best_symexpr_symbol(FinalDest,SymbolName,SymbolLoc).
 
 symbolic_expr(EAHi+InstrOffset,Size,SymbolName,Offset):-
-    riscv_absolute_split_load(EAHi,_,_,Dest),
+    riscv_symbolic_absolute_split_load(EAHi,_,_,Dest),
     instruction_immediate_offset(EAHi,1,InstrOffset,Size),
     !symbolic_expr_from_relocation(EAHi+InstrOffset,_,_,_,_),
     !symbol_minus_symbol_from_relocation(EAHi+InstrOffset,_,_,_,_,_),
@@ -683,9 +698,9 @@ symbolic_expr(EAHi+InstrOffset,Size,SymbolName,Offset):-
         Offset = 0
     ),
     (
-        boundary_sym_expr(EAHi+InstrOffset,FinalDest), SymbolLoc = "End"
+        boundary_sym_expr(EAHi+InstrOffset,FinalDest,_), SymbolLoc = "End"
         ;
-        !boundary_sym_expr(EAHi+InstrOffset,FinalDest), SymbolLoc = "Beg"
+        !boundary_sym_expr(EAHi+InstrOffset,FinalDest,_), SymbolLoc = "Beg"
     ),
     best_symexpr_symbol(FinalDest,SymbolName,SymbolLoc).
 
@@ -714,22 +729,24 @@ symbolic_expr_attribute(EALo,"LO"):-
     riscv_split_load_zero_addi_alias(_,EALo,_).
 
 symbolic_expr(EALo,4,SymbolName,0):-
-    riscv_absolute_split_load_zero_addi_alias(_,EALo,Dest),
+    riscv_absolute_split_load_zero_addi_alias(EAHi,EALo,Dest),
+    riscv_symbolic_absolute_split_load(EAHi,EALo,1,Dest),
     !symbolic_expr_from_relocation(EALo,_,_,_,_),
     !symbol_minus_symbol_from_relocation(EALo,_,_,_,_,_),
     !symbol_minus_symbol(EALo,_,_,_,_,_),
     (
-        boundary_sym_expr(EALo,Dest), SymbolLoc = "End"
+        boundary_sym_expr(EALo,Dest,_), SymbolLoc = "End"
         ;
-        !boundary_sym_expr(EALo,Dest), SymbolLoc = "Beg"
+        !boundary_sym_expr(EALo,Dest,_), SymbolLoc = "Beg"
     ),
     best_symexpr_symbol(Dest,SymbolName,SymbolLoc).
 
 symbolic_expr_attribute(EALo,"LO"):-
-    riscv_absolute_split_load_zero_addi_alias(_,EALo,_).
+    riscv_absolute_split_load_zero_addi_alias(EAHi,EALo,Dest),
+    riscv_symbolic_absolute_split_load(EAHi,EALo,1,Dest).
 
 symbolic_expr(EALo+InstrOffset,Size,SymbolName,0):-
-    riscv_absolute_split_load(_,EALo,IndexLo,Dest),
+    riscv_symbolic_absolute_split_load(_,EALo,IndexLo,Dest),
     (
         instruction_immediate_offset(EALo,IndexLo,InstrOffset,Size);
         instruction_displacement_offset(EALo,IndexLo,InstrOffset,Size)
@@ -738,9 +755,9 @@ symbolic_expr(EALo+InstrOffset,Size,SymbolName,0):-
     !symbol_minus_symbol_from_relocation(EALo+InstrOffset,_,_,_,_,_),
     !symbol_minus_symbol(EALo+InstrOffset,_,_,_,_,_),
     (
-        boundary_sym_expr(EALo+InstrOffset,Dest), SymbolLoc = "End"
+        boundary_sym_expr(EALo+InstrOffset,Dest,_), SymbolLoc = "End"
         ;
-        !boundary_sym_expr(EALo+InstrOffset,Dest), SymbolLoc = "Beg"
+        !boundary_sym_expr(EALo+InstrOffset,Dest,_), SymbolLoc = "Beg"
     ),
     best_symexpr_symbol(Dest,SymbolName,SymbolLoc).
 
@@ -781,10 +798,10 @@ symbolic_operand_attribute(EALo,IndexLo,"LO"):-
     riscv_split_load(_,EALo,IndexLo,_).
 
 symbolic_operand_attribute(EAHi,1,"HI"):-
-    riscv_absolute_split_load(EAHi,_,_,_).
+    riscv_symbolic_absolute_split_load(EAHi,_,_,_).
 
 symbolic_operand_attribute(EALo,IndexLo,"LO"):-
-    riscv_absolute_split_load(_,EALo,IndexLo,_).
+    riscv_symbolic_absolute_split_load(_,EALo,IndexLo,_).
 
 symbolic_operand_attribute(EA,Index,"LO"):-
     riscv_gp_reference(EA,Index,_).
@@ -881,7 +898,7 @@ an indirect control transfer.
 .decl riscv_absolute_jump_table_base_reg(EADef:address,RegBase:register,TableStart:address)
 
 riscv_absolute_jump_table_base_reg(EABase,RegBase,TableStart):-
-    riscv_absolute_split_load(_,EABase,_,TableStart),
+    riscv_symbolic_absolute_split_load(_,EABase,_,TableStart),
     arch.reg_arithmetic_operation(EABase,RegBase,RegBase,1,_).
 
 riscv_absolute_jump_table_base(EAJump,TableStart):-
