@@ -316,6 +316,8 @@ symbolic_operand_point(EA,Imm_index,-1,"immediate may be bitmask"):-
     symbolic_operand_candidate(EA,Imm_index,_,_),
     instruction_get_op(EA,Imm_index,Op),
     op_immediate(Op,Imm,_),
+    !direct_call(EA,_),
+    !direct_jump(EA,_),
     !defined_symbol(as(Imm,address),_,_,_,_,_,_,_,_),
     !loaded_section(as(Imm,address),_,_),
     0 = (Imm band 0xFFFFF).

@@ -90,11 +90,14 @@ shift_rotate_operation("LSR").
 shift_rotate_operation("ROR").
 
 logic_operation("AND").
-logic_operation("XOR").
-logic_operation("ORR").
-logic_operation("EON").
-logic_operation("ORN").
+logic_operation("ANDS").
 logic_operation("BIC").
+logic_operation("BICS").
+logic_operation("EON").
+logic_operation("EOR").
+logic_operation("ORN").
+logic_operation("ORR").
+logic_operation("TST").
 
 pointer_size(8).
 
