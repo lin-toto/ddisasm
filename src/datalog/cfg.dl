@@ -160,6 +160,12 @@ resolved_transfer(EA,DestAddr,Type):-
         ;
         reg_call(EA,Reg), Type = "call"
     ),
+    // Some architectures spell a direct transfer as a register transfer.
+    // For example, RISC-V AUIPC+JALR is both a reg_call at the JALR and a
+    // direct_call once the paired low immediate is applied.  Let the direct
+    // edge take precedence; value_reg contains the AUIPC high half alone and
+    // would otherwise add a bogus second target/function entry.
+    !direct_call(EA,_),
     !plt_entry(EA,_),
     reg_def_use.def_used(EA_def,Reg,EA,_),
     value_reg(EA_def,Reg,_,"NONE",_,Dest,_),

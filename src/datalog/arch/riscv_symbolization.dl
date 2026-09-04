@@ -198,6 +198,16 @@ riscv_pcrel_control_transfer(EAHi,EALo,2,Dest):-
     op_regdirect_contains_reg(RegOp,Reg),
     Dest = as(as(Base,number)+Offset,address).
 
+// Capstone renders `jalr ra, reg, 0` using the one-operand `jalr reg`
+// alias.  Recover that zero-offset form as well.  Requiring operands two
+// through four to be absent keeps this rule disjoint from the expanded form
+// above, where the immediate contributes to the destination.
+riscv_pcrel_control_transfer(EAHi,EALo,1,Dest):-
+    riscv_auipc(EAHi,Reg,Dest),
+    next(EAHi,EALo),
+    instruction(EALo,_,_,"JALR",RegOp,0,0,0,_,_),
+    op_regdirect_contains_reg(RegOp,Reg).
+
 riscv_pcrel_control_transfer(EAHi,EALo,2,Dest):-
     riscv_auipc(EAHi,Reg,Base),
     next(EAHi,EALo),
@@ -316,7 +326,7 @@ riscv_split_load(EAHi,EALo,IndexLo,Dest):-
 riscv_absolute_split_load_zero_addi_alias(EAHi,EALo,Dest):-
     binary_type("EXEC"),
     riscv_lui(EAHi,Reg,Dest),
-    next(EAHi,EALo),
+    reg_def_use.def_used(EAHi,Reg,EALo,_),
     instruction(EALo,4,_, "MV", OpSrc, OpDst, 0, 0, _, _),
     op_regdirect_contains_reg(OpSrc,Reg),
     op_regdirect_contains_reg(OpDst,_),
@@ -341,7 +351,9 @@ riscv_absolute_split_load(EAHi,EALo,1,Dest):-
 riscv_absolute_split_load(EAHi,EALo,IndexLo,Dest):-
     binary_type("EXEC"),
     riscv_lui(EAHi,Reg,Base),
-    next(EAHi,EALo),
+    // Independent instructions may be scheduled between the upper and lower
+    // halves.  Use the reaching definition instead of requiring adjacency.
+    reg_def_use.def_used(EAHi,Reg,EALo,_),
     instruction_get_operation(EALo,Operation),
     Operation != "ADDIW",
     Operation != "C.ADDIW",
@@ -362,16 +374,119 @@ riscv_absolute_split_load(EAHi,EALo,IndexLo,Dest):-
     ).
 
 // Unlike AUIPC, LUI can materialize either an address or an integer constant.
-// Route absolute split-load candidates through the generic symbolization score
-// before emitting a symbolic expression.
+// A numeric value merely landing inside an instruction is therefore only a
+// candidate, not positive address evidence.  Require either an exact original
+// symbol or a strictly positive generic score for code targets (for example,
+// a later use as a memory base).  A neutral code-interior match must remain
+// literal: otherwise a scalar such as a multiplier or packed error value can
+// be rebound to an unrelated instruction when the output is laid out again.
+//
+// Data addresses are deliberately retained at neutral score.  Their dominant
+// RV64 medlow spelling is LUI/ADDI, and addresses passed to callees or returned
+// to callers often have no local dereference from which to derive a positive
+// score.  Suppressing those pairs leaves stale .rodata/.data addresses after
+// relayout.
+//
+// Keep the symbolic_operand guard as well as the stricter positive-evidence
+// gate so architecture-specific negative evidence (such as stack adjustment
+// or scalar-logic use) can still override an exact-symbol coincidence.
 riscv_symbolic_absolute_split_load(EAHi,EALo,IndexLo,Dest):-
     riscv_absolute_split_load(EAHi,EALo,IndexLo,Dest),
-    symbolic_operand(EAHi,1,Dest,_).
+    symbolic_operand(EAHi,1,Dest,_),
+    (
+        !code(Dest)
+        ;
+        defined_symbol(Dest,_,_,_,_,_,_,_,_)
+        ;
+        symbolic_operand_total_points(EAHi,1,Points),
+        Points > 0
+    ).
+
+/**
+An unrelocated LUI/ADDI pair can materialize a large stack-frame adjustment
+whose numeric value happens to equal a code or data address.  The generic
+def-used-for-address heuristic sees the later stack memory accesses and would
+otherwise turn that scalar into a symbolic address.  Relayout then changes the
+adjustment with the coincidental symbol and corrupts the stack.
+
+Require the completed split value's exact reaching definition to be consumed
+directly by an ADD that writes the architectural stack pointer.  This keeps the
+negative evidence specific to stack-size arithmetic; ordinary LUI/ADDI address
+materializations, including values later used as memory bases, are unaffected.
+Explicit relocations remain authoritative.
+*/
+.decl riscv_split_immediate_stack_adjustment(
+          EAHi:address,EALo:address,IndexLo:operand_index)
+
+riscv_split_immediate_stack_adjustment(EAHi,EALo,IndexLo):-
+    riscv_absolute_split_load(EAHi,EALo,IndexLo,_),
+    riscv_lui(EAHi,UpperReg,_),
+    arch.reg_arithmetic_operation(EALo,ValueReg,UpperReg,1,_),
+    reg_def_use.def_used(EALo,ValueReg,EAAdjust,_),
+    arch.stack_pointer(StackReg),
+    arch.reg_reg_arithmetic_operation(
+        EAAdjust,StackReg,StackReg,ValueReg,1,0),
+    !instruction_has_relocation(EAHi,_),
+    !instruction_has_relocation(EALo,_).
+
+symbolic_operand_point(EAHi,1,-2,
+                       "riscv split immediate adjusts stack pointer"):-
+    riscv_split_immediate_stack_adjustment(EAHi,_,_).
+
+symbolic_operand_point(EALo,IndexLo,-2,
+                       "riscv split immediate adjusts stack pointer"):-
+    riscv_split_immediate_stack_adjustment(_,EALo,IndexLo).
+
+// An unrelocated LUI/ADDI pair can also construct a scalar multiplier whose
+// value happens to equal an exact code symbol.  Exact target identity is useful
+// address evidence in general, but the completed value's direct use by a
+// multiplication/shift operation is independent evidence that this occurrence
+// is numeric.  Use -2 because generic value-flow can contribute +1 when the
+// resulting scalar later participates in an address calculation.  A genuine
+// address use of the completed value, or an explicit relocation on either
+// half, leaves the pair untouched.
+.decl riscv_split_immediate_scalar_scale(
+          EAHi:address,EALo:address,IndexLo:operand_index)
+
+riscv_split_immediate_scalar_scale(EAHi,EALo,IndexLo):-
+    riscv_absolute_split_load(EAHi,EALo,IndexLo,_),
+    riscv_lui(EAHi,UpperReg,_),
+    arch.reg_arithmetic_operation(EALo,ValueReg,UpperReg,1,_),
+    reg_def_use.def_used(EALo,ValueReg,EAScale,_),
+    instruction_get_operation(EAScale,ScaleOperation),
+    arch.multiplication_operation(ScaleOperation),
+    !def_used_for_address(EALo,ValueReg,_),
+    !instruction_has_relocation(EAHi,_),
+    !instruction_has_relocation(EALo,_).
+
+symbolic_operand_point(EAHi,1,-2,
+                       "riscv split immediate used as scalar scale"):-
+    riscv_split_immediate_scalar_scale(EAHi,_,_).
+
+symbolic_operand_point(EALo,IndexLo,-2,
+                       "riscv split immediate used as scalar scale"):-
+    riscv_split_immediate_scalar_scale(_,EALo,IndexLo).
+
+// A LUI/ADDI pair may materialize a scalar mask whose numeric value happens
+// to be an unlabeled instruction address.  Treat a direct logical use of the
+// completed value as negative address evidence.  Genuine pointers retain the
+// expression when the destination has an original symbol or when the generic
+// downstream-address-use evidence offsets this penalty.
+symbolic_operand_point(EAHi,1,-1,
+                       "riscv split immediate used as scalar logic operand"):-
+    riscv_absolute_split_load(EAHi,EALo,_,Dest),
+    code(Dest),
+    !defined_symbol(Dest,_,_,_,_,_,_,_,_),
+    riscv_lui(EAHi,Reg,_),
+    arch.reg_arithmetic_operation(EALo,Reg,Reg,1,_),
+    reg_def_use.def_used(EALo,Reg,EAUse,_),
+    instruction_get_operation(EAUse,Operation),
+    arch.logic_operation(Operation).
 
 riscv_absolute_split_load(EAHi,EALo,IndexLo,Dest):-
     binary_type("EXEC"),
     riscv_lui(EAHi,Reg,Base),
-    next(EAHi,EALo),
+    reg_def_use.def_used(EAHi,Reg,EALo,_),
     arch.memory_access("LOAD",EALo,IndexLo,_,_,Reg,"NONE",_,Offset),
     Dest = as(as(Base,number)+Offset,address),
     (
@@ -389,7 +504,7 @@ riscv_absolute_split_load(EAHi,EALo,IndexLo,Dest):-
 riscv_absolute_split_load(EAHi,EALo,IndexLo,Dest):-
     binary_type("EXEC"),
     riscv_lui(EAHi,Reg,Base),
-    next(EAHi,EALo),
+    reg_def_use.def_used(EAHi,Reg,EALo,_),
     arch.memory_access("STORE",EALo,_,IndexLo,_,Reg,"NONE",_,Offset),
     Dest = as(as(Base,number)+Offset,address),
     (
@@ -431,6 +546,21 @@ riscv_got_reference(GotEntry,SymbolName,0):-
     !tls_index(GotEntry,_),
     !tls_descriptor(GotEntry,_),
     symbol(as(Target,address),_,_,_,_,_,_,_,SymbolName).
+
+// Static executables may have no dynamic relocation left for a resolved GOT
+// slot.  Use the lower-stratum raw pointer evidence for that slot so the
+// RISC-V AUIPC+load spelling retains its GOT attribute instead of becoming a
+// direct PC-relative load from the target object.  Depending on final
+// symbolic_expr here would introduce a negation cycle through the ordinary
+// non-GOT split-load fallback below.
+riscv_got_reference(GotEntry,Symbol,0):-
+    loaded_section(Beg,End,".got"),
+    GotEntry >= Beg,
+    GotEntry < End,
+    address_in_data_refined(GotEntry,Target),
+    !tls_index(GotEntry,_),
+    !tls_descriptor(GotEntry,_),
+    symbol(Target,_,_,_,_,_,_,_,Symbol).
 
 .decl riscv_split_load_got(EAHi:address,EALo:address,IndexLo:operand_index,Symbol:symbol,Addend:number)
 
@@ -648,6 +778,28 @@ symbolic_expr(EALo+InstrOffset,Size,SymbolName,0):-
     !symbol_minus_symbol_from_relocation(EALo+InstrOffset,_,_,_,_,_),
     !symbol_minus_symbol(EALo+InstrOffset,_,_,_,_,_),
     riscv_pcrel_anchor_symbol(EAHi,SymbolName).
+
+// The one-operand `jalr reg` alias has an encoded zero I-immediate but
+// Capstone exposes no immediate operand for instruction_immediate_offset.
+// Attach the LO expression to the whole instruction so a relayout can still
+// recompute the low 12 bits.  The RISC-V printer expands this alias back to
+// `jalr ra,reg,%pcrel_lo(anchor)` when the expression is present.
+symbolic_expr(EALo,Size,SymbolName,0):-
+    riscv_pcrel_control_transfer(EAHi,EALo,1,_),
+    !riscv_pcrel_plt_call(EAHi,EALo,_),
+    instruction(EALo,Size,_,"JALR",_,0,0,0,_,_),
+    !symbolic_expr_from_relocation(EALo,_,_,_,_),
+    !symbol_minus_symbol_from_relocation(EALo,_,_,_,_,_),
+    !symbol_minus_symbol(EALo,_,_,_,_,_),
+    riscv_pcrel_anchor_symbol(EAHi,SymbolName).
+
+symbolic_expr_attribute(EALo,"PCREL"):-
+    riscv_pcrel_control_transfer(EAHi,EALo,1,_),
+    !riscv_pcrel_plt_call(EAHi,EALo,_).
+
+symbolic_expr_attribute(EALo,"LO"):-
+    riscv_pcrel_control_transfer(EAHi,EALo,1,_),
+    !riscv_pcrel_plt_call(EAHi,EALo,_).
 
 symbolic_expr(EAHi+InstrOffset,Size,Symbol,Addend):-
     riscv_split_load_got(EAHi,_,_,Symbol,Addend),
@@ -900,6 +1052,15 @@ an indirect control transfer.
 riscv_absolute_jump_table_base_reg(EABase,RegBase,TableStart):-
     riscv_symbolic_absolute_split_load(_,EABase,_,TableStart),
     arch.reg_arithmetic_operation(EABase,RegBase,RegBase,1,_).
+
+// An ADDI with a zero low half is rendered by Capstone as `mv reg,reg`.
+// It is still the completed definition of the absolute table base, but MV has
+// no reg_arithmetic_operation fact and therefore needs an explicit form here.
+// Keep the split-load prerequisite so an unrelated move cannot seed a table.
+riscv_absolute_jump_table_base_reg(EABase,RegBase,TableStart):-
+    riscv_symbolic_absolute_split_load(_,EABase,_,TableStart),
+    instruction(EABase,_,_,"MV",_,OpDst,0,0,_,_),
+    op_regdirect_contains_reg(OpDst,RegBase).
 
 riscv_absolute_jump_table_base(EAJump,TableStart):-
     riscv_absolute_jump_table_base_reg(EABase,RegBase,TableStart),
