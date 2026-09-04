@@ -302,6 +302,24 @@ DirectReg, BaseReg, and IndexReg may be untracked registers or unstandardized na
 .output memory_access
 
 /**
+Represents an addressed memory operand that an instruction reads.
+
+Unlike `memory_access("LOAD", ...)`, this relation does not imply that a
+destination register is replaced by the value from memory.  It therefore also
+includes read-modify-write arithmetic and vector instructions.  Analyses that
+only need evidence about the bytes being read should use this relation, while
+value and def-use analyses should continue to use `load`.
+*/
+.decl memory_read(EA:address,MemOp:operand_index,BaseReg:reg_nullable,
+    IndexReg:reg_nullable,Mult:number,Offset:number,AccessSize:unsigned)
+
+memory_read(EA,MemOp,BaseReg,IndexReg,Mult,Offset,AccessSize):-
+    instruction_get_src_op(EA,MemOp,Op),
+    op_indirect_mapped(Op,_,BaseReg,IndexReg,Mult,Offset,_),
+    instruction_memory_access_size(EA,MemOp,AccessSize),
+    AccessSize > 0.
+
+/**
 Represents a load from memory to a register.
 
 See arch.memory_access().

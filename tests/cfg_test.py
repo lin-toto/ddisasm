@@ -20,6 +20,122 @@ class CfgTests(unittest.TestCase):
     @unittest.skipUnless(
         platform.system() == "Linux", "This test is linux only."
     )
+    def test_post_function_indexed_table_is_data(self):
+        """
+        Indexed table data placed after a function remains data even when a
+        scalar data pointer seeds a valid-looking conditional code chain.
+        """
+
+        binary = Path("ex")
+        with cd(ex_asm_dir / "ex_post_function_indexed_data"):
+            self.assertTrue(compile("gcc", "g++", "-O0", []))
+            ir_library = disassemble(binary).ir()
+            module = ir_library.modules[0]
+
+            marker = b"POSTFUNC-INDEXED\x00"
+            matches = []
+            for section in module.sections:
+                for interval in section.byte_intervals:
+                    if interval.address is None:
+                        continue
+                    contents = bytes(interval.contents)
+                    start = 0
+                    while True:
+                        offset = contents.find(marker, start)
+                        if offset < 0:
+                            break
+                        matches.append(interval.address + offset)
+                        start = offset + 1
+
+            self.assertEqual(len(matches), 1)
+            table_start = matches[0] - 16
+            next_function = next(
+                module.symbols_named("post_table_function")
+            ).referent
+            self.assertIsInstance(next_function, gtirb.CodeBlock)
+            table_end = next_function.address
+
+            overlapping_code = [
+                block
+                for block in module.code_blocks
+                if block.address < table_end
+                and block.address + block.size > table_start
+            ]
+            table_data = sorted(
+                (
+                    max(block.address, table_start),
+                    min(block.address + block.size, table_end),
+                )
+                for block in module.data_blocks
+                if block.address < table_end
+                and block.address + block.size > table_start
+            )
+
+            self.assertEqual(overlapping_code, [])
+            covered_until = table_start
+            for start, end in table_data:
+                self.assertLessEqual(start, covered_until)
+                covered_until = max(covered_until, end)
+            self.assertEqual(covered_until, table_end)
+
+    @unittest.skipUnless(
+        platform.system() == "Linux", "This test is linux only."
+    )
+    def test_conditional_with_invalid_fallthrough_is_data(self):
+        """
+        Bytes that only resemble a conditional branch, with an invalid
+        fallthrough and no independent code evidence, remain data.
+        """
+
+        binary = Path("ex")
+        with cd(ex_asm_dir / "ex_conditional_invalid_data"):
+            self.assertTrue(compile("gcc", "g++", "-O0", []))
+            ir_library = disassemble(binary).ir()
+            module = ir_library.modules[0]
+
+            # The displacement byte is linker-selected; the surrounding bytes
+            # are a unique marker for the embedded table candidate.
+            marker_prefix = bytes.fromhex("9979")
+            marker_suffix = bytes.fromhex("5a060f0bdeadbeef43464721")
+            matches = []
+            for section in module.sections:
+                for interval in section.byte_intervals:
+                    if interval.address is None:
+                        continue
+                    contents = bytes(interval.contents)
+                    for offset in range(max(0, len(contents) - 13)):
+                        if contents[offset : offset + 2] != marker_prefix:
+                            continue
+                        if contents[offset + 3 : offset + 15] == marker_suffix:
+                            matches.append(interval.address + offset)
+
+            self.assertEqual(len(matches), 1)
+            data_address = matches[0]
+            false_code_end = data_address + 3
+
+            overlapping_code = [
+                block
+                for block in module.code_blocks
+                if block.address < false_code_end
+                and block.address + block.size > data_address
+            ]
+            covering_data = [
+                block
+                for block in module.data_blocks
+                if block.address <= data_address
+                and block.address + block.size >= false_code_end
+            ]
+
+            self.assertEqual(overlapping_code, [])
+            self.assertEqual(len(covering_data), 1)
+            self.assertIsInstance(
+                next(module.symbols_named("real_target")).referent,
+                gtirb.CodeBlock,
+            )
+
+    @unittest.skipUnless(
+        platform.system() == "Linux", "This test is linux only."
+    )
     def test_relative_jump_tables(self):
         """
         Test edges for relative jump tables are added.

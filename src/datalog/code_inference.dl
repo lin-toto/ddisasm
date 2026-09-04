@@ -671,6 +671,475 @@ data_block_candidate(Block,AccessSize):-
     code_in_block_candidate(EA,_),
     code_in_block_candidate(EA_load,_).
 
+.decl referenced_data_start(Block:address)
+
+referenced_data_start(Block):-
+    arch.simple_data_load(EA,Block,_),
+    code_in_block_candidate(EA,_).
+
+referenced_data_start(Block):-
+    composite_data_access(EA,EA_load,Block,_),
+    code_in_block_candidate(EA,_),
+    code_in_block_candidate(EA_load,_).
+
+/**
+An indexed memory access whose base comes from a PC-relative address.
+
+Unlike `data_access`, this relation intentionally uses only code-candidate and
+straight-line def-use facts, so it remains available during code inference.
+The operand-index join ensures that the PC-relative register is the base of the
+actual load rather than merely another register used by the instruction.
+*/
+.decl pc_relative_indexed_data_use(
+    DefEA:address,
+    DataStart:address,
+    LoadEA:address
+)
+
+pc_relative_indexed_data_use(DefEA,DataStart,LoadEA):-
+    arch.pc_relative_addr(DefEA,BaseReg,DataStart),
+    straight_line_def_used(DefEA,BaseReg,LoadEA,MemOp),
+    arch.memory_read(
+        LoadEA,MemOp,BaseReg,IndexReg,Multiplier,_,_),
+    IndexReg != "NONE",
+    Multiplier != 0,
+    code_in_block_candidate(DefEA,_),
+    code_in_block_candidate(LoadEA,_).
+
+/**
+The table base may be kept live across basic blocks in hand-written assembly.
+The early straight-line def-use relation deliberately cannot follow that case,
+because the final CFG is not available until after code inference.  Recover
+the same evidence conservatively when both instructions are contained in one
+metadata-backed function, the use follows the definition, and no other
+metadata-backed function starts between them.
+
+Require the use to be reachable from the definition inside the function and
+reject any intervening base-register definition.  The later post-function
+rule still requires two distinct indexed uses of the same base and bounds the
+data at the next metadata-backed function.  Thus this rule alone cannot turn
+an arbitrary PC-relative address into a data extent.
+*/
+.decl metadata_function_entry_between(Beg:address,End:address)
+
+metadata_function_entry_between(Beg,End):-
+    arch.pc_relative_addr(Beg,BaseReg,_),
+    arch.memory_read(End,_,BaseReg,_,_,_,_),
+    metadata_function_extent(FuncBeg,FuncEnd),
+    Beg >= FuncBeg,
+    End < FuncEnd,
+    metadata_function_entry(EA),
+    EA > Beg,
+    EA <= End.
+
+pc_relative_indexed_data_use(DefEA,DataStart,LoadEA):-
+    arch.pc_relative_addr(DefEA,BaseReg,DataStart),
+    arch.memory_read(
+        LoadEA,_,BaseReg,IndexReg,Multiplier,_,_),
+    IndexReg != "NONE",
+    Multiplier != 0,
+    metadata_function_extent(FuncBeg,FuncEnd),
+    DefEA >= FuncBeg,
+    DefEA < FuncEnd,
+    LoadEA > DefEA,
+    LoadEA < FuncEnd,
+    !metadata_function_entry_between(DefEA,LoadEA),
+    metadata_function_instruction_reachable(
+        DefEA,FuncBeg,FuncEnd,LoadEA),
+    !register_redefined_between(DefEA,LoadEA,BaseReg),
+    code_in_block_candidate(DefEA,_),
+    code_in_block_candidate(LoadEA,_).
+
+/**
+Function extents and entries backed directly by input metadata.
+*/
+.decl metadata_function_extent(Beg:address,End:address)
+
+metadata_function_extent(Beg,Beg+Size):-
+    defined_symbol(Beg,Size,Type,_,_,_,_,_,_),
+    (Type = "FUNC"; Type = "GNU_IFUNC"),
+    Size > 0.
+
+metadata_function_extent(Beg,End):-
+    fde_addresses(Beg,End),
+    End > Beg.
+
+.decl metadata_function_entry(EA:address)
+
+metadata_function_entry(EA):-
+    function_symbol(EA,_).
+
+metadata_function_entry(EA):-
+    fde_addresses(EA,_).
+
+/**
+Instruction starts reachable from a metadata-backed function entry without
+using the still-evolving code-block candidates.  This provides an acyclic
+witness for function-local data-access inference while excluding unrelated
+instruction decodes embedded in the function's bytes.
+*/
+.decl metadata_function_entry_reachable(
+    FuncBeg:address,
+    FuncEnd:address,
+    EA:address
+)
+
+metadata_function_entry_reachable(FuncBeg,FuncEnd,FuncBeg):-
+    metadata_function_extent(FuncBeg,FuncEnd),
+    possible_ea(FuncBeg).
+
+metadata_function_entry_reachable(FuncBeg,FuncEnd,Next):-
+    metadata_function_entry_reachable(FuncBeg,FuncEnd,EA),
+    may_fallthrough(EA,Next),
+    Next >= FuncBeg,
+    Next < FuncEnd,
+    possible_ea(Next).
+
+metadata_function_entry_reachable(FuncBeg,FuncEnd,Next):-
+    metadata_function_entry_reachable(FuncBeg,FuncEnd,EA),
+    direct_jump(EA,Next),
+    Next >= FuncBeg,
+    Next < FuncEnd,
+    possible_ea(Next).
+
+/**
+A PC-relative base register can remain live across basic-block boundaries in
+hand-written assembly even when all of its uses have fixed displacements.  The
+early straight-line def-use relation cannot connect those uses.  Record the
+conservative function-local cases here: the base is defined and used in one
+metadata-backed function, and no decoded instruction redefines it in between.
+*/
+.decl register_redefined_between(
+    DefEA:address,
+    UseEA:address,
+    Reg:register
+)
+
+/**
+Instruction starts reachable from a PC-relative definition while remaining in
+the same metadata-backed function.  Following only real fallthrough and direct
+control-flow edges excludes byte-offset decodes that overlap those reachable
+instructions.
+*/
+.decl metadata_function_instruction_reachable(
+    DefEA:address,
+    FuncBeg:address,
+    FuncEnd:address,
+    EA:address
+)
+
+metadata_function_instruction_reachable(
+        DefEA,FuncBeg,FuncEnd,DefEA):-
+    arch.pc_relative_addr(DefEA,_,RefAddr),
+    code_section(RefSection),
+    loaded_section(RefBeg,RefEnd,RefSection),
+    RefAddr >= RefBeg,
+    RefAddr < RefEnd,
+    metadata_function_extent(FuncBeg,FuncEnd),
+    DefEA >= FuncBeg,
+    DefEA < FuncEnd,
+    possible_ea(DefEA).
+
+metadata_function_instruction_reachable(
+        DefEA,FuncBeg,FuncEnd,Next):-
+    metadata_function_instruction_reachable(
+        DefEA,FuncBeg,FuncEnd,EA),
+    may_fallthrough(EA,Next),
+    Next >= FuncBeg,
+    Next < FuncEnd,
+    possible_ea(Next).
+
+metadata_function_instruction_reachable(
+        DefEA,FuncBeg,FuncEnd,Next):-
+    metadata_function_instruction_reachable(
+        DefEA,FuncBeg,FuncEnd,EA),
+    direct_jump(EA,Next),
+    Next >= FuncBeg,
+    Next < FuncEnd,
+    possible_ea(Next).
+
+register_redefined_between(DefEA,UseEA,Reg):-
+    arch.pc_relative_addr(DefEA,Reg,_),
+    arch.memory_read(UseEA,_,Reg,_,_,_,_),
+    metadata_function_instruction_reachable(
+        DefEA,_,FuncEnd,RedefEA),
+    UseEA < FuncEnd,
+    basic_reg_def_use.def(RedefEA,Reg),
+    RedefEA > DefEA,
+    RedefEA < UseEA.
+
+/**
+A PC-relative address is sometimes copied into the register that performs the
+actual memory reads.  In particular, hand-written assembly commonly selects
+between two table bases with a conditional move.  Track one such value-
+preserving transfer, while rejecting any definition of the destination between
+the move and the read.  The domains below are deliberately tied to one
+PC-relative definition and one metadata-backed function so this helper cannot
+form a binary-wide register-name cross product.
+*/
+.decl pc_relative_moved_base_redefined_between(
+    DefEA:address,
+    MoveEA:address,
+    UseEA:address,
+    Reg:register
+)
+
+pc_relative_moved_base_redefined_between(
+        DefEA,MoveEA,UseEA,BaseReg):-
+    arch.pc_relative_addr(DefEA,SourceReg,_),
+    straight_line_def_used(DefEA,SourceReg,MoveEA,_),
+    arch.move_reg_reg(MoveEA,BaseReg,SourceReg),
+    BaseReg != SourceReg,
+    arch.pointer_size(PointerSize),
+    instruction_get_src_op(MoveEA,_,SourceOp),
+    op_regdirect(SourceOp,SourceInputReg),
+    reg_map(SourceInputReg,SourceReg),
+    arch.register_size_bytes(SourceInputReg,PointerSize),
+    instruction_get_dest_op(MoveEA,_,BaseOp),
+    op_regdirect(BaseOp,BaseInputReg),
+    reg_map(BaseInputReg,BaseReg),
+    arch.register_size_bytes(BaseInputReg,PointerSize),
+    arch.memory_read(UseEA,_,BaseReg,_,_,_,_),
+    UseEA > MoveEA,
+    metadata_function_instruction_reachable(
+        DefEA,FuncBeg,FuncEnd,MoveEA),
+    metadata_function_instruction_reachable(
+        DefEA,FuncBeg,FuncEnd,UseEA),
+    metadata_function_instruction_reachable(
+        DefEA,FuncBeg,FuncEnd,RedefEA),
+    basic_reg_def_use.def(RedefEA,BaseReg),
+    RedefEA > MoveEA,
+    RedefEA < UseEA.
+
+.decl metadata_function_fixed_data_use(
+    DefEA:address,
+    RefAddr:address,
+    LoadEA:address,
+    Data:address
+)
+
+metadata_function_fixed_data_use(
+        DefEA,RefAddr,LoadEA,Data):-
+    arch.pc_relative_addr(DefEA,BaseReg,RefAddr),
+    arch.memory_read(
+        LoadEA,_,BaseReg,"NONE",_,Offset,_),
+    metadata_function_extent(FuncBeg,FuncEnd),
+    DefEA >= FuncBeg,
+    DefEA < FuncEnd,
+    LoadEA > DefEA,
+    LoadEA < FuncEnd,
+    metadata_function_instruction_reachable(
+        DefEA,FuncBeg,FuncEnd,LoadEA),
+    !register_redefined_between(DefEA,LoadEA,BaseReg),
+    code_in_block_candidate(DefEA,_),
+    code_in_block_candidate(LoadEA,_),
+    Data = as(as(RefAddr,number) + Offset,address).
+
+/**
+An acyclic counterpart used while constructing anonymous data candidates.
+Reachability from the metadata-backed function entry replaces dependency on
+the still-evolving code-block candidates, and the access size bounds the exact
+loaded byte range.
+*/
+.decl metadata_function_reachable_fixed_data_use(
+    DefEA:address,
+    RefAddr:address,
+    LoadEA:address,
+    Data:address,
+    AccessSize:unsigned
+)
+
+metadata_function_reachable_fixed_data_use(
+        DefEA,RefAddr,LoadEA,Data,AccessSize):-
+    arch.pc_relative_addr(DefEA,BaseReg,RefAddr),
+    arch.memory_read(
+        LoadEA,_,BaseReg,"NONE",_,Offset,AccessSize),
+    metadata_function_extent(FuncBeg,FuncEnd),
+    DefEA >= FuncBeg,
+    DefEA < FuncEnd,
+    metadata_function_entry_reachable(FuncBeg,FuncEnd,DefEA),
+    LoadEA > DefEA,
+    LoadEA < FuncEnd,
+    metadata_function_instruction_reachable(
+        DefEA,FuncBeg,FuncEnd,LoadEA),
+    !register_redefined_between(DefEA,LoadEA,BaseReg),
+    Data = as(as(RefAddr,number) + Offset,address).
+
+// Recover fixed reads through one value-preserving register transfer.  This
+// remains a normal data candidate through post_function_fixed_data_access_extent;
+// only the byte range actually delimited by two or more reads receives the
+// additional evidence, so later unlabeled code is not swept into the pool.
+metadata_function_reachable_fixed_data_use(
+        DefEA,RefAddr,LoadEA,Data,AccessSize):-
+    arch.pc_relative_addr(DefEA,SourceReg,RefAddr),
+    straight_line_def_used(DefEA,SourceReg,MoveEA,_),
+    arch.move_reg_reg(MoveEA,BaseReg,SourceReg),
+    BaseReg != SourceReg,
+    arch.pointer_size(PointerSize),
+    instruction_get_src_op(MoveEA,_,SourceOp),
+    op_regdirect(SourceOp,SourceInputReg),
+    reg_map(SourceInputReg,SourceReg),
+    arch.register_size_bytes(SourceInputReg,PointerSize),
+    instruction_get_dest_op(MoveEA,_,BaseOp),
+    op_regdirect(BaseOp,BaseInputReg),
+    reg_map(BaseInputReg,BaseReg),
+    arch.register_size_bytes(BaseInputReg,PointerSize),
+    arch.memory_read(
+        LoadEA,_,BaseReg,"NONE",_,Offset,AccessSize),
+    metadata_function_extent(FuncBeg,FuncEnd),
+    DefEA >= FuncBeg,
+    DefEA < FuncEnd,
+    metadata_function_entry_reachable(FuncBeg,FuncEnd,DefEA),
+    MoveEA > DefEA,
+    MoveEA < FuncEnd,
+    LoadEA > MoveEA,
+    LoadEA < FuncEnd,
+    metadata_function_instruction_reachable(
+        DefEA,FuncBeg,FuncEnd,MoveEA),
+    metadata_function_instruction_reachable(
+        DefEA,FuncBeg,FuncEnd,LoadEA),
+    !pc_relative_moved_base_redefined_between(
+        DefEA,MoveEA,LoadEA,BaseReg),
+    Data = as(as(RefAddr,number) + Offset,address).
+
+.decl address_inside_metadata_function(EA:address)
+
+address_inside_metadata_function(EA):-
+    arch.pc_relative_addr(_,_,EA),
+    metadata_function_extent(Beg,End),
+    EA >= Beg,
+    EA < End.
+
+/**
+Some post-function constant pools have no surviving input symbol.  Protect
+only the half-open byte range directly established by multiple fixed-size
+loads through one unchanged PC-relative base.  The referring definition must
+belong to a metadata-backed function, and the inferred range is bounded by the
+next metadata-backed function in the same executable section.
+
+This is deliberately a normal data candidate rather than an unconditional
+known block: independent code provenance can still win in the interval
+scheduler.
+*/
+.decl post_function_fixed_data_access_extent(
+    Block:address,
+    Size:unsigned
+)
+
+.decl post_function_fixed_data_access_limit(
+    DefEA:address,
+    RefAddr:address,
+    Block:address,
+    Next:address
+)
+
+.decl post_function_fixed_data_access_start(
+    DefEA:address,
+    RefAddr:address,
+    Block:address
+)
+
+post_function_fixed_data_access_start(DefEA,RefAddr,Block):-
+    metadata_function_reachable_fixed_data_use(
+        DefEA,RefAddr,_,_,_),
+    Block = min Data : {
+        metadata_function_reachable_fixed_data_use(
+            DefEA,RefAddr,_,Data,_)
+    }.
+
+.decl post_function_fixed_data_access_start_in_function(
+    DefEA:address,
+    RefAddr:address,
+    Block:address
+)
+
+post_function_fixed_data_access_start_in_function(DefEA,RefAddr,Block):-
+    post_function_fixed_data_access_start(DefEA,RefAddr,Block),
+    metadata_function_extent(Beg,End),
+    Block >= Beg,
+    Block < End.
+
+post_function_fixed_data_access_limit(DefEA,RefAddr,Block,Next):-
+    post_function_fixed_data_access_start(DefEA,RefAddr,Block),
+    metadata_function_reachable_fixed_data_use(
+        DefEA,RefAddr,LoadEA1,Data1,AccessSize1),
+    metadata_function_reachable_fixed_data_use(
+        DefEA,RefAddr,LoadEA2,Data2,AccessSize2),
+    LoadEA1 != LoadEA2,
+    Data1 != Data2,
+    metadata_function_extent(FuncBeg,FuncEnd),
+    DefEA >= FuncBeg,
+    DefEA < FuncEnd,
+    Block >= FuncEnd,
+    !post_function_fixed_data_access_start_in_function(
+        DefEA,RefAddr,Block),
+    code_section(SectionName),
+    loaded_section(SectionBeg,SectionEnd,SectionName),
+    Block >= SectionBeg,
+    Block < SectionEnd,
+    Next = min NextAddress : {
+        metadata_function_entry(NextAddress),
+        NextAddress > Block,
+        NextAddress <= SectionEnd
+    },
+    Data1 >= Block,
+    Data1+AccessSize1 <= Next,
+    Data2 >= Block,
+    Data2+AccessSize2 <= Next.
+
+post_function_fixed_data_access_extent(Block,End-Block):-
+    post_function_fixed_data_access_limit(DefEA,RefAddr,Block,Next),
+    End = max AccessEnd : {
+        metadata_function_reachable_fixed_data_use(
+            DefEA,RefAddr,_,Data,AccessSize),
+        Data >= Block,
+        AccessEnd = Data+AccessSize,
+        AccessEnd <= Next
+    },
+    End > Block.
+
+data_block_candidate(Block,Size):-
+    post_function_fixed_data_access_extent(Block,Size).
+
+/**
+Some hand-written routines keep an indexed lookup table in the executable
+section immediately after the routine body. Local assembler labels for these
+tables are normally absent from the final symbol table. If address-shaped
+scalar table entries happen to point back into the same bytes, ordinary code
+exploration can otherwise carve synthetic code islands out of the table.
+
+Require two distinct indexed loads using the same PC-relative base, require the
+base to be after the metadata-backed function that references it, and bound the
+candidate at the next metadata-backed function entry in the same code section.
+The target must not itself lie inside a known function. This produces a normal
+data candidate rather than an unconditional known block, so independent
+conflicting evidence is still resolved by the existing interval scheduler.
+*/
+.decl post_function_indexed_data_extent(Block:address,Size:unsigned)
+
+post_function_indexed_data_extent(Block,Next-Block):-
+    pc_relative_indexed_data_use(DefEA,Block,LoadEA1),
+    pc_relative_indexed_data_use(DefEA,Block,LoadEA2),
+    LoadEA1 != LoadEA2,
+    metadata_function_extent(FuncBeg,FuncEnd),
+    DefEA >= FuncBeg,
+    DefEA < FuncEnd,
+    Block >= FuncEnd,
+    !address_inside_metadata_function(Block),
+    code_section(SectionName),
+    loaded_section(SectionBeg,SectionEnd,SectionName),
+    Block >= SectionBeg,
+    Block < SectionEnd,
+    Next = min NextAddress : {
+        metadata_function_entry(NextAddress),
+        NextAddress > Block,
+        NextAddress <= SectionEnd
+    },
+    Next > Block.
+
+data_block_candidate(Block,Size):-
+    post_function_indexed_data_extent(Block,Size).
+
 // Repeated bytes in code section
 data_block_candidate(EA,Size):-
     repeated_byte(EA,_,Size), Size > 8,
@@ -680,6 +1149,72 @@ data_block_candidate(Block,Size),
 known_block(Block,"data",Size,"object symbol"):-
     defined_symbol(Block,Size,"OBJECT",_,_,_,_,_,_),
     Size > 0.
+
+// Hand-written assembly can declare an OBJECT without a `.size`.  When an
+// instruction independently establishes either the object address or an
+// interior address as data, conservatively infer the object's upper bound from
+// the nearest later symbol in the same section.  Excluding metadata-backed
+// function entries preserves zero-sized OBJECT symbols attached to either a
+// function symbol or an FDE-only entry.
+.decl referenced_zero_size_object_extent(Block:address,Size:unsigned)
+
+referenced_zero_size_object_extent(Block,Next-Block):-
+    defined_symbol(Block,0,"OBJECT",_,_,SectIndex,_,_,_),
+    !metadata_function_entry(Block),
+    Next = min NextAddress : {
+        defined_symbol(NextAddress,_,_,_,_,SectIndex,_,_,_),
+        NextAddress > Block
+    },
+    referenced_data_start(Reference),
+    Reference >= Block,
+    Reference < Next.
+
+data_block_candidate(Block,Size),
+known_block(Block,"data",Size,"referenced zero-size object extent"):-
+    referenced_zero_size_object_extent(Block,Size).
+
+/**
+Untyped assembler labels are also common for constant pools placed between
+hand-written functions.  Protect such a zero-sized NOTYPE range only when a
+metadata-backed function materializes an interior base and performs at least
+two distinct fixed-displacement loads through that unchanged register.  The
+range must begin after the referring function and end exactly at the next
+metadata-backed function.  A metadata-backed entry at the range start takes
+precedence over the weaker NOTYPE evidence.
+*/
+.decl post_function_notype_fixed_data_extent(
+    Block:address,
+    Size:unsigned
+)
+
+post_function_notype_fixed_data_extent(Block,Next-Block):-
+    defined_symbol(Block,0,"NOTYPE",_,_,SectIndex,_,_,_),
+    !metadata_function_entry(Block),
+    metadata_function_fixed_data_use(
+        DefEA,RefAddr,LoadEA1,Data1),
+    metadata_function_fixed_data_use(
+        DefEA,RefAddr,LoadEA2,Data2),
+    LoadEA1 != LoadEA2,
+    Data1 != Data2,
+    metadata_function_extent(FuncBeg,FuncEnd),
+    DefEA >= FuncBeg,
+    DefEA < FuncEnd,
+    Block >= FuncEnd,
+    RefAddr >= Block,
+    Next = min NextAddress : {
+        defined_symbol(NextAddress,_,_,_,_,SectIndex,_,_,_),
+        NextAddress > Block
+    },
+    metadata_function_entry(Next),
+    RefAddr < Next,
+    Data1 >= Block,
+    Data1 < Next,
+    Data2 >= Block,
+    Data2 < Next.
+
+data_block_candidate(Block,Size),
+known_block(Block,"data",Size,"post-function NOTYPE fixed-load pool"):-
+    post_function_notype_fixed_data_extent(Block,Size).
 
 data_block_candidate(BegAddr,Size),
 known_block(BegAddr,"data",Size,"seh handler table"):-
@@ -1471,6 +2006,20 @@ block_heuristic(Block,"code",Size,0,"conditional invalid fallthrough size"):-
 
 //////////////////////////////////////////////////////////////////////
 // data block candidate heuristics
+
+// Multiple fixed loads from a PC-relative base delimit an otherwise
+// anonymous post-function constant pool.  A small proportional bonus lets
+// that exact accessed range compete with coincidental instruction decodes.
+block_heuristic(Block,"data",Size,0,
+        "post-function fixed data access extent"):-
+    post_function_fixed_data_access_extent(Block,Size).
+
+// Two independent indexed loads from a PC-relative base, bounded between
+// metadata-backed functions, are stronger evidence than the neutral size score
+// alone.  A small proportional bonus lets the complete table compete with a
+// partition into many individually plausible instruction-shaped byte ranges.
+block_heuristic(Block,"data",Size,0,"post-function indexed data extent"):-
+    post_function_indexed_data_extent(Block,Size).
 
 block_heuristic(Block,"data",Size,0,"relative-jump-table"):-
     data_block_candidate(Block,Size),
