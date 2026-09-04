@@ -58,6 +58,8 @@ default_heuristic_weight("unresolved-may-fallthrough",PROPORTIONAL_WEIGHT,0).
 default_heuristic_weight("resolved-reaches strong",PROPORTIONAL_WEIGHT,2).
 default_heuristic_weight("resolved-reaches weak",PROPORTIONAL_WEIGHT,1).
 default_heuristic_weight("possible string",PROPORTIONAL_WEIGHT,1).
+default_heuristic_weight("post-function fixed data access extent",PROPORTIONAL_WEIGHT,1).
+default_heuristic_weight("post-function indexed data extent",PROPORTIONAL_WEIGHT,1).
 
 // Simple weights
 default_heuristic_weight("address in data array",SIMPLE_WEIGHT,1).
@@ -69,6 +71,7 @@ default_heuristic_weight("composite data access: 1 resolved",SIMPLE_WEIGHT,3).
 default_heuristic_weight("composite data access: 2 resolved",SIMPLE_WEIGHT,4).
 default_heuristic_weight("composite data access",SIMPLE_WEIGHT,2).
 default_heuristic_weight("conditional jump/return: fallthrough to invalid",SIMPLE_WEIGHT,-2).
+default_heuristic_weight("conditional invalid fallthrough size",PROPORTIONAL_WEIGHT,-5).
 default_heuristic_weight("dangling block with enclosed instr",SIMPLE_WEIGHT,-1).
 default_heuristic_weight("data access: resolved",SIMPLE_WEIGHT,4).
 default_heuristic_weight("data access",SIMPLE_WEIGHT,2).
