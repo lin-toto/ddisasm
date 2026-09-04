@@ -730,6 +730,113 @@ the max alignment is picked for an EA later.
 */
 .decl alignment_candidate(EA:address,AlignInBits:unsigned)
 
+/**
+Recover an alignment anchor that precedes an ELF OBJECT in an executable
+section.  Hand-written assembly sometimes emits
+
+    .align N
+    .zero K
+    object:
+
+so the object intentionally begins K bytes into an N-byte region.  Aligning
+the object itself changes that residue; preserving the zero prefix's original
+power-of-two alignment preserves both the prefix and the object's low address
+bits.  Restrict this inference to a zero-prefixed, nonempty OBJECT that exactly
+fills the remainder of one power-of-two region.  That full-region constraint
+distinguishes the intended alignment from weaker divisors and coincidentally
+stronger alignment of the region start.  The 32..4096 range covers ordinary
+ABI, vector, cache-line, and page alignment without deriving enormous
+alignments merely because an ET_EXEC happens to sit at a high power-of-two VA.
+*/
+.decl zero_prefixed_code_object_alignment(
+    Anchor:address,
+    ObjectEA:address,
+    PaddingSize:unsigned,
+    AlignInBits:unsigned
+)
+
+zero_prefixed_code_object_alignment(Anchor,ObjectEA,PaddingSize,AlignInBits):-
+    defined_symbol(ObjectEA,ObjectSize,"OBJECT",_,_,_,_,_,_),
+    ObjectSize > 0,
+    // The final byte of an immediately preceding multi-byte NOP can also be
+    // zero, causing the maximal repeated-byte fact to begin just before the
+    // actual alignment boundary.  Recover an aligned suffix of that run.
+    repeated_byte(ZeroRunEA,0,ZeroRunSize),
+    ZeroRunEA + ZeroRunSize = ObjectEA,
+    code_section(Section),
+    loaded_section(Begin,End,Section),
+    ObjectEA + ObjectSize <= End,
+    Exponent = range(5,13,1),
+    AlignInBits = as(2^Exponent,unsigned),
+    PaddingSize = as(ObjectEA,unsigned) % AlignInBits,
+    PaddingSize >= 8,
+    ObjectSize + (as(ObjectEA,unsigned) % AlignInBits) = AlignInBits,
+    Anchor = ObjectEA - PaddingSize,
+    Anchor >= ZeroRunEA,
+    Anchor >= Begin,
+    PaddingSize < AlignInBits.
+
+/**
+Recover the alignment required by an x86 table-copy selection idiom used by
+hand-written assembly.  The sequence
+
+    lea table(%rip), base
+    lea MASK(%rsp), tmp
+    sub base, tmp
+    and MASK, tmp
+    lea (base,tmp), base
+
+selects one of several table copies while matching low address bits derived
+from the stack.  Its arithmetic is valid only when ``table`` is aligned to the
+lowest set bit in MASK.  Requiring the complete adjacent five-instruction
+sequence, the same registers throughout, equal stack offset and mask, an
+existing data boundary, and an originally aligned target avoids deriving an
+alignment from an ordinary address calculation.
+*/
+.decl x64_low_bit_selected_table_alignment(
+    TableEA:address,
+    AlignInBits:unsigned
+)
+
+x64_low_bit_selected_table_alignment(TableEA,AlignInBits):-
+    binary_isa("X64"),
+    instruction(EA1,_,_,"LEA",_,BaseOut,0,0,_,_),
+    pc_relative_operand(EA1,_,TableEA),
+    op_regdirect_contains_reg(BaseOut,BaseReg),
+    next(EA1,EA2),
+    instruction(EA2,_,_,"LEA",StackOp,TmpOut,0,0,_,_),
+    op_indirect_mapped(
+        StackOp,"NONE",StackReg,"NONE",1,StackOffset,_
+    ),
+    arch.stack_pointer(StackReg),
+    op_regdirect_contains_reg(TmpOut,TmpReg),
+    next(EA2,EA3),
+    instruction(EA3,_,_,"SUB",BaseIn,TmpIn,0,0,_,_),
+    op_regdirect_contains_reg(BaseIn,BaseReg),
+    op_regdirect_contains_reg(TmpIn,TmpReg),
+    next(EA3,EA4),
+    instruction(EA4,_,_,"AND",MaskOp,TmpMask,0,0,_,_),
+    op_immediate(MaskOp,Mask,_),
+    Mask > 0,
+    Mask = StackOffset,
+    op_regdirect_contains_reg(TmpMask,TmpReg),
+    next(EA4,EA5),
+    instruction(EA5,_,_,"LEA",CombinedOp,BaseFinal,0,0,_,_),
+    op_indirect_mapped(
+        CombinedOp,"NONE",BaseReg,TmpReg,1,0,_
+    ),
+    op_regdirect_contains_reg(BaseFinal,BaseReg),
+    Exponent = range(5,13,1),
+    AlignInBits = as(2^Exponent,unsigned),
+    0 = Mask band as(AlignInBits-1,number),
+    as(AlignInBits,number) = Mask band as(AlignInBits,number),
+    0 = as(TableEA,unsigned) band (AlignInBits-1),
+    data_object_boundary(TableEA),
+    code_section(Section),
+    loaded_section(Begin,End,Section),
+    TableEA >= Begin,
+    TableEA < End.
+
 // Data in code needs to be aligned when referenced by instruction that
 // requires aligned memory: e.g., some SIMD instructions
 alignment_candidate(DataEA, AlignInBits):-
@@ -742,6 +849,75 @@ alignment_candidate(DataEA, AlignInBits):-
     data_segment(Begin,End),
     DataEA >= Begin,
     DataEA < End.
+
+// A composite access materializes a PC-relative base in one instruction and
+// applies a fixed displacement in a later aligned load.  Aligning only the
+// final data address is insufficient: during re-layout the alignment padding
+// can be inserted between the materialized base and the target, invalidating
+// the fixed displacement.  When the original base has the same alignment as
+// the target, preserve that alignment at the base as well so their relative
+// offset remains stable.
+alignment_candidate(BaseEA, AlignInBits):-
+    // Use every alignment already justified for the effective target, rather
+    // than only the minimum required by this particular load.  Another access
+    // may impose a stronger alignment on the same target (for example, a
+    // vector-width direct load alongside a narrower base+displacement load).
+    // Positive recursion also propagates that constraint through longer
+    // materialized-base chains.
+    alignment_candidate(DataEA,AlignInBits),
+    composite_data_access(BaseInsnEA,LoadEA,DataEA,_),
+    arch.alignment_required(LoadEA,_),
+    arch.pc_relative_addr(BaseInsnEA,_,BaseEA),
+    BaseEA % AlignInBits = DataEA % AlignInBits,
+    data_segment(Begin,End),
+    BaseEA >= Begin,
+    BaseEA < End.
+
+// Value analysis can recover a fixed data address through arithmetic that is
+// more involved than composite_data_access.  One common shape materializes a
+// PC-relative base, adjusts it with one or more constant LEAs, and then uses a
+// fixed displacement in a load.  If the resulting target has a justified
+// alignment, aligning only that interior target can insert padding between it
+// and the earlier base and invalidate the fixed arithmetic.  Preserve the
+// same alignment at the original PC-relative base when both addresses had the
+// same residue.  EADef ties the recovered constant to that exact PC-relative
+// materialization rather than to an unrelated constant-valued register.
+alignment_candidate(BaseEA, AlignInBits):-
+    alignment_candidate(DataEA,AlignInBits),
+    arch.pc_relative_addr(BaseInsnEA,_,BaseEA),
+    const_value_reg_used(LoadEA,BaseInsnEA,_,BaseReg,RegValue),
+    arch.reg_relative_load(LoadEA,BaseReg,Offset,_),
+    DataEA = as(RegValue + Offset,address),
+    BaseEA % AlignInBits = DataEA % AlignInBits,
+    data_segment(Begin,End),
+    BaseEA >= Begin,
+    BaseEA < End.
+
+// Assembly implementations sometimes place a non-code table in an executable
+// section and pass its address to a helper that performs aligned vector loads.
+// The load then has no direct or composite reference back to the table, so the
+// instruction-local rules above cannot recover its alignment.  Preserve the
+// original 32-byte alignment of a nonempty ELF OBJECT in a code section.  The
+// symbol type and section restriction avoid treating ordinary coincidentally
+// aligned code labels as data-alignment evidence.
+alignment_candidate(EA,32):-
+    defined_symbol(EA,Size,"OBJECT",_,_,_,_,_,_),
+    Size >= 32,
+    EA % 32 = 0,
+    code_section(Section),
+    loaded_section(Begin,End,Section),
+    EA >= Begin,
+    EA + Size <= End.
+
+// Preserve the anchor, not the following object: the object's nonzero residue
+// within the aligned region can be part of program semantics.
+alignment_candidate(Anchor,AlignInBits):-
+    zero_prefixed_code_object_alignment(
+        Anchor,_,_,AlignInBits
+    ).
+
+alignment_candidate(TableEA,AlignInBits):-
+    x64_low_bit_selected_table_alignment(TableEA,AlignInBits).
 
 // In addition to global/weak functions,
 // some local functions may need alignments: e.g., member function pointers

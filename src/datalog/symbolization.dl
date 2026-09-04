@@ -303,6 +303,27 @@ symbolic_operand_point(EA,Imm_index,-1,"immediate is bitmask"):-
     instruction_get_operation(EA,Operation),
     arch.logic_operation(Operation).
 
+// An integer materialized by a move can accidentally equal an unlabeled
+// address inside a data OBJECT.  A direct shift/rotate of that value is strong
+// scalar evidence: Brotli, for example, shifts a packed hexadecimal nibble
+// table before masking it.  The generic used-for-address relation can later
+// follow that scalar through arithmetic into an indexed memory access, so use
+// -2 to dominate its +1 without affecting relocations or exact target symbols.
+symbolic_operand_point(EA,Imm_index,-2,
+                       "shifted immediate points inside unlabeled data object"):-
+    symbolic_operand_candidate(EA,Imm_index,Dest,"data"),
+    op_immediate_and_reg(EA,Operation,Reg,Imm_index,_),
+    arch.move_operation(Operation),
+    reg_def_use.def_used(EA,Reg,ShiftEA,_),
+    instruction_get_operation(ShiftEA,ShiftOperation),
+    arch.shift_rotate_operation(ShiftOperation),
+    !instruction_has_relocation(EA,_),
+    defined_symbol(Beg,Size,"OBJECT",_,_,_,_,_,_),
+    Size > 0,
+    Dest > Beg,
+    Dest < Beg+Size,
+    !defined_symbol(Dest,_,_,_,_,_,_,_,_).
+
 // Heuristic: treat values with >=20 trailing zero bits (0xFFFFF) as bitmasks.
 //
 // This threshold is empirical, not architectural. It was chosen to avoid
@@ -326,7 +347,12 @@ symbolic_operand_point(EA,Imm_index,-2,"point to exception section"):-
     symbolic_operand_candidate(EA,Imm_index,Dest,_),
     exception_section(Name),
     loaded_section(Base,End,Name),
-    Base <= Dest, Dest < End.
+    Base <= Dest, Dest < End,
+    // Exact original symbols are independent evidence that the immediate is
+    // an address.  In particular, crtbegin passes __EH_FRAME_BEGIN__ to the
+    // frame-registration helpers; leaving that immediate numeric makes it
+    // stale as soon as reconstruction moves .eh_frame.
+    !defined_symbol(Dest,_,_,_,_,_,_,_,_).
 
 symbolic_operand_point(EA,Imm_index,-1,"operated on logical operation result"):-
     op_immediate_and_reg(EA,_,Reg,Imm_index,_),
@@ -656,21 +682,33 @@ data_object_candidate(EA,Size,"other"):-
 
 ///////////////////////////////////////////////////////////////////////////////////////////
 // Heuristic: If there are at least 3 consecutive addresses
-//  we consider that we found an array of addresses
-// we do not cross labels
+//  we consider that we found an array of addresses.
+// Do not join candidates across either symbol starts or the declared end of
+// an original OBJECT.  The latter is not itself a label, but is an equally
+// strong source-layout boundary.  Without it, an address-shaped scalar in the
+// final bytes of one object can become the first member of an unrelated,
+// regularly spaced pointer sequence that follows the object.
+.decl original_object_boundary(EA:address)
+
+original_object_boundary(ObjectBeg+ObjectSize):-
+    defined_symbol(ObjectBeg,ObjectSize,"OBJECT",_,_,_,_,_,_),
+    ObjectSize > 0.
+
 .decl after_address_in_data(EA:address,EA_next:address)
 
 after_address_in_data(EA,EA+Pt_size):-
     address_in_data_refined(EA,_),
     arch.pointer_size(Pt_size),
     data_byte(EA+Pt_size,_),
-    !labeled_data_candidate(EA+Pt_size).
+    !labeled_data_candidate(EA+Pt_size),
+    !original_object_boundary(EA+Pt_size).
 
 after_address_in_data(EA,EA_aux+1):-
     after_address_in_data(EA,EA_aux),
     !address_in_data_refined(EA_aux,_),
     data_byte(EA_aux+1,_),
-    !labeled_data_candidate(EA_aux+1).
+    !labeled_data_candidate(EA_aux+1),
+    !original_object_boundary(EA_aux+1).
 
 .decl next_address_in_data(EA:address,EA_next:address)
 
@@ -796,7 +834,8 @@ data_object_point(EA,Size,"symbol-symbol",4,"symbol-symbol"):-
 // Pointer array heuristic
 data_object_point(EA,Pt_size,"symbol",3,"pointer array"):-
     data_object_candidate(EA,Pt_size,"symbol"),
-    address_array(EA,_,_).
+    address_array(EA,Distance,_),
+    Distance % Pt_size = 0.
 
 // a pointer array should point to elements of the same type
 // the pointed elements get points if they are all the same type
@@ -828,6 +867,35 @@ data_object_point(EA,Pt_size,"symbol",5,"data access"):-
         preferred_data_access(EA,0,_)
     ).
 
+// A pointer-width window inside a densely accessed narrower-scalar table can
+// accidentally decode as an address.  For example, two adjacent uint32_t DES
+// table entries form one aligned uint64_t value on a 64-bit executable; if
+// that value happens to equal a linked symbol address, relayout corrupts both
+// scalar entries.  A propagated sub-pointer-width access is direct evidence
+// for the source field boundary.  A second clause below uses the same evidence
+// at OBJECT scope when inferred data limits stop local propagation.  Reject
+// only otherwise-unanchored windows so relocations, exact source labels,
+// pointer-width accesses, and real pointer arrays continue to win.
+.decl unanchored_pointer_window_with_narrow_access(
+          EA:address,Pt_size:unsigned)
+
+unanchored_pointer_window_with_narrow_access(EA,Pt_size):-
+    arch.pointer_size(Pt_size),
+    data_object_candidate(EA,Pt_size,"symbol"),
+    preferred_data_access(EA,AccessSize,_),
+    AccessSize > 0,
+    AccessSize < Pt_size,
+    Pt_size % AccessSize = 0,
+    !defined_symbol(EA,_,_,_,_,_,_,_,_),
+    !relocation(EA,_,_,_,_,_,_),
+    !preferred_data_access(EA,Pt_size,_),
+    !preferred_data_access(EA,0,_),
+    !address_array(EA,_,_).
+
+data_object_point(EA,Pt_size,"symbol",-10,
+                  "narrow scalar access defines smaller fields"):-
+    unanchored_pointer_window_with_narrow_access(EA,Pt_size).
+
 // if we conflict with several other candidates we reduce the points
 data_object_point(EA,Pt_size,"symbol",-2,"multiple conflict"):-
     data_object_candidate(EA,Pt_size,"symbol"),
@@ -850,6 +918,969 @@ data_object_point(EA,Pt_size,"symbol",2,"aligned"):-
     data_object_candidate(EA,Pt_size,"symbol"),
     EA % Pt_size = 0.
 
+// A pointer-width window can begin in the final bytes of another candidate
+// and accidentally decode as an address.  An exact target symbol is strong
+// destination evidence, but it says nothing about the source-field boundary.
+// When such a candidate starts strictly inside a naturally aligned
+// pointer-width candidate, apply a source-alignment tie-break.  The modest
+// penalty leaves relocations, demonstrated data accesses, and pointer-array
+// structure strong enough to retain genuine packed pointers; it only makes a
+// weak interior window lose to the aligned field that contains its start.
+data_object_point(EA,Pt_size,"symbol",-4,
+                  "starts inside aligned pointer candidate"):-
+    data_object_candidate(EA,Pt_size,"symbol"),
+    EA % Pt_size != 0,
+    data_object_candidate(AlignedEA,Pt_size,"symbol"),
+    AlignedEA % Pt_size = 0,
+    AlignedEA < EA,
+    EA < AlignedEA+Pt_size.
+
+// A fully linked executable may no longer retain a relocation for a pointer
+// stored in data.  If its value is exactly the start of an original symbol,
+// that symbol is independent address evidence.  This also resolves the
+// otherwise ambiguous case where the low bytes of the address form a short
+// NUL-terminated printable string: the pointer candidate must win over the
+// coincidental string candidate so that relayout updates the stored address.
+// Keep this weaker than an explicit relocation, and require an exact target
+// rather than an unlabeled object interior.  Exact destination identity alone
+// does not defeat a genuine source string: short text such as "mac" can itself
+// encode a valid address.  In that conflict, require independent source-side
+// pointer provenance (a label, relocation, pointer-width/unknown access, or
+// pointer-array shape).  Structured runtime/linker sections are excluded as
+// sources because their fixed-width scalar records can contain the same
+// accidental exact-address bit patterns.
+.decl source_in_special_data_section(EA:address,Size:unsigned)
+
+source_in_special_data_section(EA,Size):-
+    data_object_candidate(EA,Size,_),
+    special_data_section(Name),
+    loaded_section(Beg,End,Name),
+    EA >= Beg,
+    EA+Size <= End.
+
+data_object_point(EA,Pt_size,"symbol",5,"points to exact symbol"):-
+    data_object_candidate(EA,Pt_size,"symbol"),
+    address_in_data_refined(EA,Dest),
+    defined_symbol(Dest,_,Type,_,_,_,_,_,_),
+    Type != "SECTION",
+    !source_in_special_data_section(EA,Pt_size),
+    (
+        !string_candidate_refined(EA,_,_)
+        ;
+        defined_symbol(EA,_,_,_,_,_,_,_,_)
+        ;
+        relocation(EA,_,_,_,_,_,_)
+        ;
+        preferred_data_access(EA,Pt_size,_)
+        ;
+        preferred_data_access(EA,0,_)
+        ;
+        address_array(EA,_,_)
+    ).
+
+// Exact identity at the destination cannot by itself establish an unaligned
+// source-field boundary.  In particular, a pointer-width window that straddles
+// two naturally aligned scalar slots, or starts in the tail of an object and
+// continues through its padding, can accidentally decode as the address of a
+// real function or object.  Penalize candidates whose start is inside an
+// original nonzero OBJECT and has no independent source provenance: no source
+// symbol, relocation, pointer-width access, or pointer-array shape.  A window
+// crossing the declared end is even less likely to be a genuine field, so it
+// deliberately receives the same penalty as one fully contained in the object.
+// The -5 score turns the otherwise isolated exact-symbol score of +4 into -1;
+// genuine packed pointers remain recoverable through any of those independent
+// anchors (and stronger structural recovery rules remain additive).
+.decl unanchored_unaligned_pointer_starting_in_object(
+          EA:address,Pt_size:unsigned)
+
+unanchored_unaligned_pointer_starting_in_object(EA,Pt_size):-
+    arch.pointer_size(Pt_size),
+    data_object_candidate(EA,Pt_size,"symbol"),
+    EA % Pt_size != 0,
+    defined_symbol(SrcBeg,SrcSize,"OBJECT",_,_,_,_,_,_),
+    SrcSize > 0,
+    EA >= SrcBeg,
+    EA < SrcBeg+SrcSize,
+    !defined_symbol(EA,_,_,_,_,_,_,_,_),
+    !relocation(EA,_,_,_,_,_,_),
+    !preferred_data_access(EA,Pt_size,_),
+    !preferred_data_access(EA,0,_),
+    !address_array(EA,_,_).
+
+data_object_point(EA,Pt_size,"symbol",-5,
+                  "unanchored unaligned source inside object"):-
+    unanchored_unaligned_pointer_starting_in_object(EA,Pt_size).
+
+// The converse source-boundary collision begins in anonymous padding and
+// crosses the start of a named object.  On little-endian executables, the
+// padding plus the object's first scalar bytes can accidentally equal the
+// exact address of an unrelated symbol.  Re-emitting that window as a pointer
+// would then overwrite bytes owned by the named object when layout changes.
+// An original nonzero OBJECT start is strong source-boundary evidence, but it
+// must not suppress a genuine packed field that has its own relocation,
+// pointer-width access, source label, or pointer-array structure.
+.decl unanchored_unaligned_pointer_crossing_object_start(
+          EA:address,Pt_size:unsigned)
+
+unanchored_unaligned_pointer_crossing_object_start(EA,Pt_size):-
+    arch.pointer_size(Pt_size),
+    data_object_candidate(EA,Pt_size,"symbol"),
+    EA % Pt_size != 0,
+    defined_symbol(ObjectBeg,ObjectSize,"OBJECT",_,_,_,_,_,_),
+    ObjectSize > 0,
+    ObjectBeg > EA,
+    ObjectBeg < EA+Pt_size,
+    !defined_symbol(EA,_,_,_,_,_,_,_,_),
+    !relocation(EA,_,_,_,_,_,_),
+    !preferred_data_access(EA,Pt_size,_),
+    !preferred_data_access(EA,0,_),
+    !address_array(EA,_,_).
+
+data_object_point(EA,Pt_size,"symbol",-5,
+                  "unanchored source crosses object start"):-
+    unanchored_unaligned_pointer_crossing_object_start(EA,Pt_size).
+
+// Consecutive relative jump-table entries are scalar offsets, not storage for
+// an overlapping pointer-width field.  Their byte windows can nevertheless
+// decode as an exact code address: two adjacent 32-bit switch offsets may, for
+// example, form the little-endian value of a real function symbol when read
+// starting in the middle of the first entry.  Reject an otherwise unanchored
+// pointer candidate when its source window overlaps at least two entries of
+// the same smaller-entry table.  A relocation, exact pointer-width load, or
+// established pointer array remains independent source provenance in case a
+// tentative jump-table analysis overlaps genuine packed data.
+.decl unanchored_pointer_overlapping_relative_jump_table(
+          EA:address,Pt_size:unsigned)
+
+unanchored_pointer_overlapping_relative_jump_table(EA,Pt_size):-
+    arch.pointer_size(Pt_size),
+    data_object_candidate(EA,Pt_size,"symbol"),
+    relative_jump_table_entry(JumpEA1,TableStart,EntrySize,_,_,_,_),
+    relative_jump_table_entry(JumpEA2,TableStart,EntrySize,_,_,_,_),
+    EntrySize < Pt_size,
+    JumpEA1 != JumpEA2,
+    JumpEA1 < EA+Pt_size,
+    EA < JumpEA1+EntrySize,
+    JumpEA2 < EA+Pt_size,
+    EA < JumpEA2+EntrySize,
+    !relocation(EA,_,_,_,_,_,_),
+    !preferred_data_access(EA,Pt_size,_),
+    !preferred_data_access(EA,0,_),
+    !address_array(EA,_,_).
+
+data_object_point(EA,Pt_size,"symbol",-10,
+                  "overlaps multiple relative jump-table entries"):-
+    unanchored_pointer_overlapping_relative_jump_table(EA,Pt_size).
+
+// A raw integer can also happen to equal an address strictly inside a known
+// data object.  Exact target symbols are independent pointer evidence, but an
+// unlabeled interior match on its own is weak: the usual bias, source
+// alignment, and lack of label conflicts otherwise give it a positive score.
+// Keep this penalty small so pointer-sized accesses, pointer arrays, and
+// relocations continue to retain genuine interior data pointers.
+.decl unlabeled_interior_data_object_address(EA:address)
+
+unlabeled_interior_data_object_address(EA):-
+    address_in_data_refined(_,EA),
+    defined_symbol(Beg,Size,"OBJECT",_,_,_,_,_,_),
+    Size > 0,
+    EA > Beg,
+    EA < Beg+Size,
+    !defined_symbol(EA,_,_,_,_,_,_,_,_).
+
+data_object_point(EA,Pt_size,"symbol",-2,"points inside unlabeled data object"):-
+    data_object_candidate(EA,Pt_size,"symbol"),
+    address_in_data_refined(EA,Dest),
+    unlabeled_interior_data_object_address(Dest).
+
+// Arrays of records often contain the same pointer field at a fixed stride.
+// Interleaved fields can prevent the ordinary address-array heuristic from
+// recognizing that evidence.  Recover only a strong five-member pattern
+// contained in one nonzero source OBJECT and pointing inside one nonzero
+// destination OBJECT.  Original symbol and nested-object boundaries split
+// runs, and extension is allowed only through exact next members (no holes).
+.decl interior_object_pointer(EA:address,SrcBeg:address,SrcEnd:address,
+                              DestBeg:address,DestEnd:address)
+
+interior_object_pointer(EA,SrcBeg,SrcBeg+SrcSize,DestBeg,DestBeg+DestSize):-
+    arch.pointer_size(Pt_size),
+    data_object_candidate(EA,Pt_size,"symbol"),
+    address_in_data_refined(EA,Dest),
+    EA % Pt_size = 0,
+    defined_symbol(SrcBeg,SrcSize,"OBJECT",_,_,_,_,_,_),
+    SrcSize > 0,
+    EA >= SrcBeg,
+    EA+Pt_size <= SrcBeg+SrcSize,
+    defined_symbol(DestBeg,DestSize,"OBJECT",_,_,_,_,_,_),
+    DestSize > 0,
+    Dest > DestBeg,
+    Dest < DestBeg+DestSize,
+    !defined_symbol(Dest,_,_,_,_,_,_,_,_).
+
+.decl interior_object_pointer_boundary_between(
+          EA:address,Next:address,SrcBeg:address,SrcEnd:address,
+          DestBeg:address,DestEnd:address)
+
+interior_object_pointer_boundary_between(
+          EA,Next,SrcBeg,SrcEnd,DestBeg,DestEnd):-
+    interior_object_pointer(EA,SrcBeg,SrcEnd,DestBeg,DestEnd),
+    interior_object_pointer(Next,SrcBeg,SrcEnd,DestBeg,DestEnd),
+    Next > EA,
+    defined_symbol(Boundary,_,_,_,_,_,_,_,_),
+    Boundary > EA,
+    Boundary <= Next.
+
+interior_object_pointer_boundary_between(
+          EA,Next,SrcBeg,SrcEnd,DestBeg,DestEnd):-
+    interior_object_pointer(EA,SrcBeg,SrcEnd,DestBeg,DestEnd),
+    interior_object_pointer(Next,SrcBeg,SrcEnd,DestBeg,DestEnd),
+    Next > EA,
+    defined_symbol(Beg,Size,"OBJECT",_,_,_,_,_,_),
+    Size > 0,
+    Beg+Size > EA,
+    Beg+Size <= Next.
+
+.decl interior_object_pointer_between(EA:address,Next:address,
+                                      SrcBeg:address,SrcEnd:address,
+                                      DestBeg:address,DestEnd:address)
+
+interior_object_pointer_between(EA,Next,SrcBeg,SrcEnd,DestBeg,DestEnd):-
+    interior_object_pointer(EA,SrcBeg,SrcEnd,DestBeg,DestEnd),
+    interior_object_pointer(Next,SrcBeg,SrcEnd,DestBeg,DestEnd),
+    Next > EA,
+    interior_object_pointer(Mid,SrcBeg,SrcEnd,DestBeg,DestEnd),
+    Mid > EA,
+    Mid < Next.
+
+.decl next_interior_object_pointer(EA:address,Next:address,
+                                   SrcBeg:address,SrcEnd:address,
+                                   DestBeg:address,DestEnd:address)
+
+next_interior_object_pointer(EA,Next,SrcBeg,SrcEnd,DestBeg,DestEnd):-
+    interior_object_pointer(EA,SrcBeg,SrcEnd,DestBeg,DestEnd),
+    interior_object_pointer(Next,SrcBeg,SrcEnd,DestBeg,DestEnd),
+    Next > EA,
+    !interior_object_pointer_between(EA,Next,SrcBeg,SrcEnd,DestBeg,DestEnd),
+    !interior_object_pointer_boundary_between(
+        EA,Next,SrcBeg,SrcEnd,DestBeg,DestEnd).
+
+.decl interior_object_pointer_seed(EA:address,Stride:unsigned,
+                                   SrcBeg:address,SrcEnd:address,
+                                   DestBeg:address,DestEnd:address)
+
+interior_object_pointer_seed(EA,Stride,SrcBeg,SrcEnd,DestBeg,DestEnd):-
+    arch.pointer_size(Pt_size),
+    next_interior_object_pointer(EA,EA1,SrcBeg,SrcEnd,DestBeg,DestEnd),
+    Stride = EA1-EA,
+    Stride >= 4*Pt_size,
+    Stride % Pt_size = 0,
+    next_interior_object_pointer(EA1,EA2,SrcBeg,SrcEnd,DestBeg,DestEnd),
+    EA2 = EA1+Stride,
+    next_interior_object_pointer(EA2,EA3,SrcBeg,SrcEnd,DestBeg,DestEnd),
+    EA3 = EA2+Stride,
+    next_interior_object_pointer(EA3,EA4,SrcBeg,SrcEnd,DestBeg,DestEnd),
+    EA4 = EA3+Stride,
+    EA4+Pt_size <= SrcEnd.
+
+.decl repeated_interior_object_pointer_member(
+          EA:address,Stride:unsigned,SrcBeg:address,SrcEnd:address,
+          DestBeg:address,DestEnd:address)
+
+repeated_interior_object_pointer_member(
+          EA,Stride,SrcBeg,SrcEnd,DestBeg,DestEnd):-
+    interior_object_pointer_seed(
+        EA,Stride,SrcBeg,SrcEnd,DestBeg,DestEnd).
+
+repeated_interior_object_pointer_member(
+          Next,Stride,SrcBeg,SrcEnd,DestBeg,DestEnd):-
+    repeated_interior_object_pointer_member(
+        EA,Stride,SrcBeg,SrcEnd,DestBeg,DestEnd),
+    next_interior_object_pointer(
+        EA,Next,SrcBeg,SrcEnd,DestBeg,DestEnd),
+    Next = EA+Stride.
+
+.decl repeated_interior_object_pointer(EA:address)
+
+repeated_interior_object_pointer(EA):-
+    repeated_interior_object_pointer_member(EA,_,_,_,_,_).
+
+data_object_point(EA,Pt_size,"symbol",2,
+                  "repeated strided interior-object pointer"):-
+    arch.pointer_size(Pt_size),
+    data_object_candidate(EA,Pt_size,"symbol"),
+    repeated_interior_object_pointer(EA).
+
+// A short or isolated record-field run may sit outside the five-member
+// repeated-pointer chain even though the surrounding descriptor table gives
+// independent structural evidence.  Recover the candidate only when the
+// u32 immediately before it is a positive byte length and a data-pointer
+// array member two or three records later points exactly that many bytes
+// farther into the same destination OBJECT.  The seed establishes the record
+// stride; this rule neither propagates recursively nor crosses a source
+// symbol/OBJECT boundary.
+.decl length_delimited_interior_pointer(EA:address)
+
+length_delimited_interior_pointer(EA):-
+    interior_object_pointer(EA,SrcBeg,SrcEnd,DestBeg,DestEnd),
+    address_in_data_refined(EA,Dest),
+    EA >= SrcBeg+4,
+    data_uword(EA-4,4,Length),
+    Length > 0,
+    interior_object_pointer_seed(
+        _,Stride,SrcBeg,SrcEnd,DestBeg,DestEnd),
+    interior_object_pointer(
+        Next,SrcBeg,SrcEnd,DestBeg,DestEnd),
+    address_in_data_refined(Next,NextDest),
+    address_array_aux(Next,_,"data",_),
+    (
+        Next = EA+2*Stride
+        ;
+        Next = EA+3*Stride
+    ),
+    NextDest = Dest+Length,
+    NextDest > Dest,
+    !interior_object_pointer_boundary_between(
+        EA,Next,SrcBeg,SrcEnd,DestBeg,DestEnd).
+
+data_object_point(EA,Pt_size,"symbol",2,
+                  "length-delimited interior-object pointer"):-
+    arch.pointer_size(Pt_size),
+    data_object_candidate(EA,Pt_size,"symbol"),
+    length_delimited_interior_pointer(EA).
+
+// Compiler constant pools frequently contain arrays of descriptor records in
+// which a pointer is followed by a pointer-width byte length.  Four records
+// are sufficient independent evidence when the first target is the exact
+// start of one nonzero OBJECT and both source and destination advance at fixed
+// strides.  This complements the five-member interior-pointer rule above:
+// the source pool need not have its own OBJECT symbol, and exact object-base
+// evidence anchors the shorter run.  Positive lengths must remain within the
+// destination object, and original source boundaries split runs.
+.decl sized_object_pointer(EA:address,Dest:address,
+                           DestBeg:address,DestEnd:address)
+
+sized_object_pointer(EA,Dest,DestBeg,DestBeg+DestSize):-
+    arch.pointer_size(Pt_size),
+    data_object_candidate(EA,Pt_size,"symbol"),
+    address_in_data_refined(EA,Dest),
+    EA % Pt_size = 0,
+    data_uword(EA+Pt_size,Pt_size,Length),
+    Length > 0,
+    defined_symbol(DestBeg,DestSize,"OBJECT",_,_,_,_,_,_),
+    DestSize > 0,
+    Dest >= DestBeg,
+    Dest < DestBeg+DestSize,
+    Length <= DestBeg+DestSize-Dest.
+
+.decl sized_pointer_source_boundary_between(Beg:address,End:address)
+
+sized_pointer_source_boundary_between(Beg,End):-
+    sized_object_pointer(Beg,_,_,_),
+    sized_object_pointer(End,_,_,_),
+    defined_symbol(Boundary,_,_,_,_,_,_,_,_),
+    Boundary > Beg,
+    Boundary <= End.
+
+sized_pointer_source_boundary_between(Beg,End):-
+    sized_object_pointer(Beg,_,_,_),
+    sized_object_pointer(End,_,_,_),
+    defined_symbol(ObjectBeg,ObjectSize,"OBJECT",_,_,_,_,_,_),
+    ObjectSize > 0,
+    ObjectBeg+ObjectSize > Beg,
+    ObjectBeg+ObjectSize <= End.
+
+.decl strided_sized_object_pointer_seed(
+          EA:address,Stride:unsigned,DestStride:unsigned,
+          SrcBeg:address,SrcEnd:address,DestBeg:address,DestEnd:address)
+
+strided_sized_object_pointer_seed(
+          EA,Stride,DestStride,SrcBeg,SrcEnd,DestBeg,DestEnd):-
+    arch.pointer_size(Pt_size),
+    sized_object_pointer(EA,DestBeg,DestBeg,DestEnd),
+    sized_object_pointer(EA1,Dest1,DestBeg,DestEnd),
+    EA1 > EA,
+    Stride = EA1-EA,
+    Stride >= 4*Pt_size,
+    Stride % Pt_size = 0,
+    Dest1 > DestBeg,
+    DestStride = Dest1-DestBeg,
+    sized_object_pointer(EA1+Stride,Dest1+DestStride,DestBeg,DestEnd),
+    sized_object_pointer(EA1+2*Stride,Dest1+2*DestStride,DestBeg,DestEnd),
+    regular_data_section(SrcName),
+    loaded_section(SrcBeg,SrcEnd,SrcName),
+    EA >= SrcBeg,
+    EA+3*Stride+2*Pt_size <= SrcEnd,
+    !sized_pointer_source_boundary_between(EA,EA+3*Stride).
+
+.decl strided_sized_object_pointer_member(EA:address)
+
+strided_sized_object_pointer_member(EA):-
+    strided_sized_object_pointer_seed(EA,_,_,_,_,_,_).
+
+strided_sized_object_pointer_member(EA+Stride):-
+    strided_sized_object_pointer_seed(EA,Stride,_,_,_,_,_).
+
+strided_sized_object_pointer_member(EA+2*Stride):-
+    strided_sized_object_pointer_seed(EA,Stride,_,_,_,_,_).
+
+strided_sized_object_pointer_member(EA+3*Stride):-
+    strided_sized_object_pointer_seed(EA,Stride,_,_,_,_,_).
+
+// A second pointer/length field can be interleaved in the same four records.
+// Retain it only when all four members preserve both the established record
+// stride and their own constant offset within the destination object.  The
+// field and its length must fit before the next record.
+.decl parallel_strided_sized_object_pointer_seed(
+          ParallelEA:address,Stride:unsigned)
+
+parallel_strided_sized_object_pointer_seed(ParallelEA,Stride):-
+    arch.pointer_size(Pt_size),
+    strided_sized_object_pointer_seed(
+        EA,Stride,DestStride,_,SrcEnd,DestBeg,DestEnd),
+    sized_object_pointer(ParallelEA,ParallelDest,DestBeg,DestEnd),
+    ParallelEA > EA,
+    ParallelEA < EA+Stride,
+    FieldOffset = ParallelEA-EA,
+    FieldOffset >= 2*Pt_size,
+    FieldOffset % Pt_size = 0,
+    FieldOffset+2*Pt_size <= Stride,
+    ParallelDest > DestBeg,
+    sized_object_pointer(
+        ParallelEA+Stride,ParallelDest+DestStride,DestBeg,DestEnd),
+    sized_object_pointer(
+        ParallelEA+2*Stride,ParallelDest+2*DestStride,DestBeg,DestEnd),
+    sized_object_pointer(
+        ParallelEA+3*Stride,ParallelDest+3*DestStride,DestBeg,DestEnd),
+    ParallelEA+3*Stride+2*Pt_size <= SrcEnd,
+    !sized_pointer_source_boundary_between(
+        EA,ParallelEA+3*Stride).
+
+.decl parallel_strided_sized_object_pointer_member(EA:address)
+
+parallel_strided_sized_object_pointer_member(ParallelEA):-
+    parallel_strided_sized_object_pointer_seed(ParallelEA,_).
+
+parallel_strided_sized_object_pointer_member(ParallelEA+Stride):-
+    parallel_strided_sized_object_pointer_seed(ParallelEA,Stride).
+
+parallel_strided_sized_object_pointer_member(ParallelEA+2*Stride):-
+    parallel_strided_sized_object_pointer_seed(ParallelEA,Stride).
+
+parallel_strided_sized_object_pointer_member(ParallelEA+3*Stride):-
+    parallel_strided_sized_object_pointer_seed(ParallelEA,Stride).
+
+data_object_point(EA,Pt_size,"symbol",2,
+                  "strided pointer/length descriptor record"):-
+    arch.pointer_size(Pt_size),
+    data_object_candidate(EA,Pt_size,"symbol"),
+    (
+        strided_sized_object_pointer_member(EA)
+        ;
+        parallel_strided_sized_object_pointer_member(EA)
+    ).
+
+// A dense indexed load whose element is narrower than a native pointer is an
+// object-level scalar-layout witness.  Keep the access width explicit: only
+// pointer windows aligned to the demonstrated scalar stride are classified by
+// this evidence.
+.decl subpointer_width_dense_access(
+          AccessBase:address,AccessSize:unsigned,
+          Pt_size:unsigned,LoadEA:address)
+
+subpointer_width_dense_access(AccessBase,AccessSize,Pt_size,LoadEA):-
+    arch.pointer_size(Pt_size),
+    AccessSize > 0,
+    AccessSize < Pt_size,
+    Pt_size % AccessSize = 0,
+    data_access_pattern_candidate_refined(
+        AccessBase,AccessSize,Mult,LoadEA),
+    Mult = as(AccessSize,number),
+    dap_max_mult(AccessBase,AccessSize,Mult),
+    arch.load(LoadEA,_,_,_,_,_,_,_).
+
+// An indexed access can still establish a narrow scalar layout when exact
+// value analysis cannot fold the index to a conventional DAP.  In particular,
+// preserve a range introduced by a low-pass mask and propagated through the
+// existing move/arithmetic limit analysis.  Keep both bounds tied to the same
+// final definition so limits from unrelated control-flow paths are not mixed.
+.decl bounded_subpointer_width_access(
+          AccessBeg:address,AccessEnd:address,AccessSize:unsigned,
+          Pt_size:unsigned,LoadEA:address)
+
+bounded_subpointer_width_access(
+        AccessBeg,AccessEnd,AccessSize,Pt_size,LoadEA):-
+    arch.pointer_size(Pt_size),
+    AccessSize > 0,
+    AccessSize < Pt_size,
+    Pt_size % AccessSize = 0,
+    arch.load(
+        LoadEA,OpIndex,_,_,BaseReg,IndexReg,Scale,MemOffset),
+    data_access(
+        LoadEA,OpIndex,"NONE",BaseReg,IndexReg,
+        Scale,MemOffset,AccessSize),
+    reg_nonnull(IndexReg,IndexReg_nn),
+    Scale = as(AccessSize,number),
+    value_reg_at_operand(
+        LoadEA,OpIndex,BaseReg,_,0,BaseAddress,"complete"),
+    last_value_reg_limit(
+        BoundFrom,LoadEA,IndexReg_nn,IndexMin,"MIN",BoundSteps),
+    last_value_reg_limit(
+        BoundFrom,LoadEA,IndexReg_nn,IndexMax,"MAX",BoundSteps),
+    BaseAddress >= 0,
+    IndexMin >= 0,
+    IndexMax >= IndexMin,
+    AccessBeg = as(
+        BaseAddress+MemOffset+IndexMin*Scale,address),
+    AccessEnd = as(
+        BaseAddress+MemOffset+IndexMax*Scale+
+        as(AccessSize,number),address),
+    AccessEnd > AccessBeg.
+
+// A pointer-width scalar table can accidentally look like an address array:
+// a dense indexed load supplies data-access points, while regularly spaced
+// bit patterns happen to land at misaligned data addresses.  That combination
+// is not pointer evidence by itself.  The load is an object-level witness:
+// inferred data limits may prevent preferred_data_access from propagating to
+// every scalar cell in a real table.
+.decl pointer_width_dense_access(
+          AccessBase:address,Pt_size:unsigned,LoadEA:address)
+
+pointer_width_dense_access(AccessBase,Pt_size,LoadEA):-
+    arch.pointer_size(Pt_size),
+    data_access_pattern_candidate_refined(
+        AccessBase,Pt_size,Mult,LoadEA),
+    Mult = as(Pt_size,number),
+    dap_max_mult(AccessBase,Pt_size,Mult),
+    arch.load(LoadEA,_,_,_,_,_,_,_).
+
+// Some architectures represent paired loads as multiple arch.load facts at
+// one instruction address, while DAP currently retains only that instruction
+// address and not its operand index.  Such an access remains valid negative
+// evidence, but cannot safely be coupled to one loaded register for recovery.
+.decl ambiguous_pointer_width_dense_load(
+          AccessBase:address,Pt_size:unsigned,LoadEA:address)
+
+ambiguous_pointer_width_dense_load(AccessBase,Pt_size,LoadEA):-
+    pointer_width_dense_access(AccessBase,Pt_size,LoadEA),
+    arch.load(LoadEA,_,_,DstReg1,_,_,_,_),
+    arch.load(LoadEA,_,_,DstReg2,_,_,_,_),
+    DstReg1 != DstReg2.
+
+.decl pointer_width_dense_load(
+          AccessBase:address,Pt_size:unsigned,
+          LoadEA:address,DstReg:register)
+
+pointer_width_dense_load(AccessBase,Pt_size,LoadEA,DstReg):-
+    pointer_width_dense_access(AccessBase,Pt_size,LoadEA),
+    arch.load(LoadEA,_,_,DstReg,_,_,_,_),
+    !ambiguous_pointer_width_dense_load(
+        AccessBase,Pt_size,LoadEA).
+
+.decl source_object_with_pointer_width_dense_load(
+          SrcBeg:address,SrcSize:unsigned,Pt_size:unsigned)
+
+source_object_with_pointer_width_dense_load(SrcBeg,SrcSize,Pt_size):-
+    defined_symbol(SrcBeg,SrcSize,"OBJECT",_,_,_,_,_,_),
+    SrcSize > 0,
+    pointer_width_dense_access(AccessBase,Pt_size,_),
+    AccessBase >= SrcBeg,
+    AccessBase+Pt_size <= SrcBeg+SrcSize.
+
+// Select the smallest original OBJECT containing the candidate.  This keeps
+// a dense load in one nested subobject from classifying an unrelated sibling
+// merely because both share a broader enclosing symbol.
+.decl source_object_containing_candidate(
+          EA:address,Pt_size:unsigned,
+          SrcBeg:address,SrcSize:unsigned)
+
+source_object_containing_candidate(EA,Pt_size,SrcBeg,SrcSize):-
+    data_object_candidate(EA,Pt_size,"symbol"),
+    defined_symbol(SrcBeg,SrcSize,"OBJECT",_,_,_,_,_,_),
+    SrcSize > 0,
+    EA >= SrcBeg,
+    EA+Pt_size <= SrcBeg+SrcSize.
+
+.decl more_specific_source_object_containing_candidate(
+          EA:address,Pt_size:unsigned,
+          SrcBeg:address,SrcSize:unsigned)
+
+more_specific_source_object_containing_candidate(
+        EA,Pt_size,SrcBeg,SrcSize):-
+    source_object_containing_candidate(
+        EA,Pt_size,SrcBeg,SrcSize),
+    source_object_containing_candidate(
+        EA,Pt_size,_,MoreSpecificSize),
+    MoreSpecificSize < SrcSize.
+
+.decl innermost_source_object_containing_candidate(
+          EA:address,Pt_size:unsigned,
+          SrcBeg:address,SrcSize:unsigned)
+
+innermost_source_object_containing_candidate(
+        EA,Pt_size,SrcBeg,SrcSize):-
+    source_object_containing_candidate(
+        EA,Pt_size,SrcBeg,SrcSize),
+    !more_specific_source_object_containing_candidate(
+        EA,Pt_size,SrcBeg,SrcSize).
+
+// Parser and callback tables commonly alternate a pointer to an anonymous
+// string with a pointer to the function that handles that name.  The ordinary
+// address-array heuristic cannot see the string field at a 2*pointer stride,
+// because the intervening code pointer becomes the next address candidate.
+// This matters when the low bytes of a string address are themselves printable:
+// the source field then also looks like a short string and can lose the normal
+// symbol/string score comparison.
+//
+// Treat three consecutive {string, code} records inside the same innermost
+// nonzero OBJECT as independent source-layout evidence.  Sliding three-record
+// seeds cover every member of a longer run while keeping isolated pairs and
+// runs split by nested OBJECT boundaries unchanged.
+.decl string_code_descriptor_record(
+          EA:address,SrcBeg:address,SrcSize:unsigned)
+
+string_code_descriptor_record(EA,SrcBeg,SrcSize):-
+    arch.pointer_size(Pt_size),
+    data_object_candidate(EA,Pt_size,"symbol"),
+    address_in_data_refined(EA,StringEA),
+    string_candidate_refined(StringEA,_,_),
+    data_object_candidate(EA+Pt_size,Pt_size,"symbol"),
+    address_in_data_refined(EA+Pt_size,CodeEA),
+    code(CodeEA),
+    innermost_source_object_containing_candidate(
+        EA,Pt_size,SrcBeg,SrcSize),
+    EA+2*Pt_size <= SrcBeg+SrcSize.
+
+.decl string_code_descriptor_seed(EA:address)
+
+string_code_descriptor_seed(EA):-
+    arch.pointer_size(Pt_size),
+    string_code_descriptor_record(EA,SrcBeg,SrcSize),
+    string_code_descriptor_record(EA+2*Pt_size,SrcBeg,SrcSize),
+    string_code_descriptor_record(EA+4*Pt_size,SrcBeg,SrcSize).
+
+.decl string_code_descriptor_member(EA:address)
+
+string_code_descriptor_member(EA):-
+    string_code_descriptor_seed(EA).
+
+string_code_descriptor_member(EA+2*Pt_size):-
+    arch.pointer_size(Pt_size),
+    string_code_descriptor_seed(EA).
+
+string_code_descriptor_member(EA+4*Pt_size):-
+    arch.pointer_size(Pt_size),
+    string_code_descriptor_seed(EA).
+
+data_object_point(EA,Pt_size,"symbol",2,
+                  "string/code descriptor record"):-
+    arch.pointer_size(Pt_size),
+    data_object_candidate(EA,Pt_size,"symbol"),
+    string_code_descriptor_member(EA).
+
+// Data-access propagation intentionally stops at inferred limits such as long
+// zero runs.  The compiler's nonzero OBJECT extent still provides a safe
+// boundary for carrying a dense narrow-element layout to a later candidate.
+// Requiring the same innermost object avoids leaking evidence into a sibling
+// nested object, the scalar-stride/extent checks require an array-shaped
+// source, and an exact destination symbol remains independent pointer evidence.
+unanchored_pointer_window_with_narrow_access(EA,Pt_size):-
+    arch.pointer_size(Pt_size),
+    data_object_candidate(EA,Pt_size,"symbol"),
+    innermost_source_object_containing_candidate(
+        EA,Pt_size,SrcBeg,SrcSize),
+    SrcSize >= 4*Pt_size,
+    subpointer_width_dense_access(
+        AccessBase,AccessSize,Pt_size,_),
+    SrcSize % AccessSize = 0,
+    AccessBase >= SrcBeg,
+    AccessBase+AccessSize <= SrcBeg+SrcSize,
+    EA >= AccessBase,
+    (EA-AccessBase) % AccessSize = 0,
+    address_in_data_refined(EA,Dest),
+    !defined_symbol(Dest,_,_,_,_,_,_,_,_),
+    !defined_symbol(EA,_,_,_,_,_,_,_,_),
+    !relocation(EA,_,_,_,_,_,_),
+    !preferred_data_access(EA,Pt_size,_),
+    !preferred_data_access(EA,0,_),
+    !address_array(EA,_,_).
+
+// Apply bounded narrow-access evidence only to the proven source range.  This
+// is intentionally more local than the object-wide DAP rule above: an OBJECT
+// may contain pointer fields outside the masked scalar subarray.
+unanchored_pointer_window_with_narrow_access(EA,Pt_size):-
+    arch.pointer_size(Pt_size),
+    data_object_candidate(EA,Pt_size,"symbol"),
+    innermost_source_object_containing_candidate(
+        EA,Pt_size,SrcBeg,SrcSize),
+    SrcSize >= 4*Pt_size,
+    bounded_subpointer_width_access(
+        AccessBeg,AccessEnd,AccessSize,Pt_size,_),
+    SrcSize % AccessSize = 0,
+    AccessBeg >= SrcBeg,
+    AccessEnd <= SrcBeg+SrcSize,
+    EA >= AccessBeg,
+    EA+Pt_size <= AccessEnd,
+    (EA-AccessBeg) % AccessSize = 0,
+    address_in_data_refined(EA,Dest),
+    !defined_symbol(Dest,_,_,_,_,_,_,_,_),
+    !defined_symbol(EA,_,_,_,_,_,_,_,_),
+    !relocation(EA,_,_,_,_,_,_),
+    !preferred_data_access(EA,Pt_size,_),
+    !preferred_data_access(EA,0,_),
+    !address_array(EA,_,_).
+
+.decl dense_misaligned_candidate_in_object(
+          EA:address,Pt_size:unsigned,
+          SrcBeg:address,SrcSize:unsigned)
+
+dense_misaligned_candidate_in_object(EA,Pt_size,SrcBeg,SrcSize):-
+    arch.pointer_size(Pt_size),
+    data_object_candidate(EA,Pt_size,"symbol"),
+    address_in_data_refined(EA,Dest),
+    !defined_symbol(Dest,_,_,_,_,_,_,_,_),
+    Dest % Pt_size != 0,
+    address_array_aux(EA,_,"data",_),
+    innermost_source_object_containing_candidate(
+        EA,Pt_size,SrcBeg,SrcSize),
+    source_object_with_pointer_width_dense_load(
+        SrcBeg,SrcSize,Pt_size),
+    EA >= SrcBeg.
+
+// Project away source-object and load witnesses before assigning a score.
+// Souffle relations already have set semantics, but this explicitly makes
+// the one-penalty-per-candidate invariant independent of witness count.
+.decl densely_indexed_interior_data_load(
+          EA:address,Pt_size:unsigned)
+
+densely_indexed_interior_data_load(EA,Pt_size):-
+    dense_misaligned_candidate_in_object(EA,Pt_size,_,_).
+
+data_object_point(EA,Pt_size,"symbol",-10,
+                  "dense indexed scalar array resembles data pointers"):-
+    densely_indexed_interior_data_load(EA,Pt_size).
+
+// String tables are a genuine instance of the same dense indexed-load shape:
+// the array holds pointers to adjacent, unlabeled string literals and the
+// loaded pointer may be returned or passed to another function rather than
+// dereferenced locally.  Exact starts of independently inferred strings are
+// strong target evidence.  Require three such members in the same
+// pointer-width data array before cancelling the dense-scalar penalty, so an
+// isolated integer that happens to equal a string address is not recovered.
+.decl dense_string_pointer_array_member(EA:address,Pt_size:unsigned)
+
+dense_string_pointer_array_member(EA,Pt_size):-
+    densely_indexed_interior_data_load(EA,Pt_size),
+    address_array_aux(EA,Pt_size,"data",InitialEA),
+    address_in_data_refined(EA,Dest),
+    string_candidate_refined(Dest,_,_),
+    address_array_aux(WitnessEA1,Pt_size,"data",InitialEA),
+    address_in_data_refined(WitnessEA1,WitnessDest1),
+    string_candidate_refined(WitnessDest1,_,_),
+    WitnessEA1 != EA,
+    address_array_aux(WitnessEA2,Pt_size,"data",InitialEA),
+    address_in_data_refined(WitnessEA2,WitnessDest2),
+    string_candidate_refined(WitnessDest2,_,_),
+    WitnessEA2 != EA,
+    WitnessEA2 != WitnessEA1.
+
+data_object_point(EA,Pt_size,"symbol",10,
+                  "member of dense pointer array to string starts"):-
+    dense_string_pointer_array_member(EA,Pt_size).
+
+// Object-wide evidence must not drive recovery: a mixed object may contain an
+// unrelated genuine pointer subarray.  Re-establish candidate-to-load
+// provenance through preferred_data_access before inspecting uses of the
+// exact value produced by that load.
+.decl dense_misaligned_candidate_load(
+          EA:address,Pt_size:unsigned,
+          AccessBase:address,LoadEA:address,DstReg:register)
+
+dense_misaligned_candidate_load(
+        EA,Pt_size,AccessBase,LoadEA,DstReg):-
+    dense_misaligned_candidate_in_object(
+        EA,Pt_size,SrcBeg,SrcSize),
+    preferred_data_access(EA,Pt_size,AccessBase),
+    AccessBase >= SrcBeg,
+    AccessBase+Pt_size <= SrcBeg+SrcSize,
+    pointer_width_dense_load(
+        AccessBase,Pt_size,LoadEA,DstReg).
+
+// Restore a candidate only when the exact loaded value is directly used as a
+// memory base.  Base-register matching deliberately excludes numeric values
+// used merely as scaled indices.  Projecting to (EA,Pt_size) guarantees a
+// single recovery score even when several equivalent uses or load witnesses
+// exist.
+.decl densely_indexed_interior_data_load_recovered(
+          EA:address,Pt_size:unsigned)
+
+densely_indexed_interior_data_load_recovered(EA,Pt_size):-
+    dense_misaligned_candidate_load(
+        EA,Pt_size,_,LoadEA,DstReg),
+    reg_def_use.def_used(LoadEA,DstReg,UseEA,_),
+    arch.memory_access(
+        _,UseEA,_,_,_,as(DstReg,reg_nullable),_,_,_).
+
+data_object_point(EA,Pt_size,"symbol",10,
+                  "dense indexed value directly used as address"):-
+    densely_indexed_interior_data_load_recovered(EA,Pt_size).
+
+// Targets stored in constructor/destructor and similar function-pointer
+// sections are independent function-entry evidence.  Derive this directly
+// from the raw data value rather than final function inference, which itself
+// depends on symbolic_data and would introduce a negative dependency cycle.
+.decl function_pointer_section_reference(Src:address,Dest:address)
+
+function_pointer_section_reference(Src,Dest):-
+    address_in_data_refined(Src,Dest),
+    function_pointer_section(Name),
+    loaded_section(Beg,End,Name),
+    Src >= Beg,
+    Src < End,
+    code(Dest).
+
+// An integer stored in data can accidentally equal the address of an
+// instruction in the middle of a function.  A pointer-sized load and source
+// alignment do not distinguish that collision from a pointer.  Apply a strong
+// penalty when the target has neither function-entry provenance nor an
+// original symbol.  A relocation or demonstrated downstream address use can
+// still retain a genuine stripped interior pointer; adjacency alone cannot.
+data_object_point(EA,Pt_size,"symbol",-10,"points at unlabeled interior code"):-
+    data_object_candidate(EA,Pt_size,"symbol"),
+    address_in_data_refined(EA,Dest),
+    code(Dest),
+    !function_inference.function_entry_initial(Dest),
+    !function_pointer_section_reference(EA,Dest),
+    !defined_symbol(Dest,_,_,_,_,_,_,_,_).
+
+// Recover an unlabeled interior pointer when a pointer-sized load is proven to
+// feed an indirect branch or call.  Limiting this to control-flow use avoids
+// treating ordinary integer indices or lengths as pointers merely because
+// they participate in a memory-address computation.
+.decl interior_code_pointer_used_for_control_flow(
+          EA:address,Pt_size:unsigned)
+
+interior_code_pointer_used_for_control_flow(EA,Pt_size):-
+    data_object_candidate(EA,Pt_size,"symbol"),
+    address_in_data_refined(EA,Dest),
+    code(Dest),
+    !function_inference.function_entry_initial(Dest),
+    !defined_symbol(Dest,_,_,_,_,_,_,_,_),
+    preferred_data_access(EA,Pt_size,AccessBase),
+    data_access_pattern(AccessBase,Pt_size,_,LoadEA),
+    arch.load(LoadEA,_,_,DstReg,_,_,_,_),
+    reg_def_use.def_used(LoadEA,DstReg,TransferEA,_),
+    (
+        reg_call(TransferEA,DstReg)
+        ;
+        reg_jump(TransferEA,DstReg)
+    ).
+
+// A direct memory-indirect transfer consumes the pointer from its slot without
+// first defining a general-purpose register, so it has no arch.load relation.
+// Preserve that equally strong address-use evidence separately.
+interior_code_pointer_used_for_control_flow(EA,Pt_size):-
+    data_object_candidate(EA,Pt_size,"symbol"),
+    address_in_data_refined(EA,Dest),
+    code(Dest),
+    !function_inference.function_entry_initial(Dest),
+    !defined_symbol(Dest,_,_,_,_,_,_,_,_),
+    preferred_data_access(EA,Pt_size,AccessBase),
+    data_access_pattern(AccessBase,Pt_size,_,TransferEA),
+    (
+        indirect_call(TransferEA)
+        ;
+        indirect_jump(TransferEA)
+    ).
+
+data_object_point(EA,Pt_size,"symbol",10,
+                  "interior code pointer used for control flow"):-
+    interior_code_pointer_used_for_control_flow(EA,Pt_size).
+
+// jump_table_element_access identifies the table base for an indexed load,
+// but preferred_data_access may not propagate that evidence to any individual
+// cell when the loaded value is transferred directly to a register jump.  In
+// that case, use the independently inferred index bound to retain exactly the
+// addressed subarray.  Do not couple multi-result loads to one destination
+// register: DAP currently records the instruction address, not its operand.
+.decl ambiguous_jump_table_load(LoadEA:address)
+
+ambiguous_jump_table_load(LoadEA):-
+    arch.load(LoadEA,_,_,DstReg1,_,_,_,_),
+    arch.load(LoadEA,_,_,DstReg2,_,_,_,_),
+    DstReg1 != DstReg2.
+
+// Bounds/value propagation can enumerate only a subset of the cells consumed
+// by an indexed indirect branch.  Once one cell in a contiguous code-pointer
+// array is proven to feed control flow, the other members are equally strong
+// pointer evidence.  Restricting this to a pointer-width stride and an already
+// established all-code address_array keeps the recovery local to the exact
+// array; unrelated or interleaved address-shaped integers remain penalized.
+.decl control_flow_code_pointer_array_member(
+          EA:address,Pt_size:unsigned)
+
+control_flow_code_pointer_array_member(EA,Pt_size):-
+    arch.pointer_size(Pt_size),
+    address_array_aux(EA,Pt_size,"code",InitialEA),
+    address_array_aux(WitnessEA,Pt_size,"code",InitialEA),
+    interior_code_pointer_used_for_control_flow(WitnessEA,Pt_size),
+    data_object_candidate(EA,Pt_size,"symbol"),
+    address_in_data_refined(EA,Dest),
+    code(Dest),
+    !function_inference.function_entry_initial(Dest),
+    !defined_symbol(Dest,_,_,_,_,_,_,_,_),
+    !interior_code_pointer_used_for_control_flow(EA,Pt_size).
+
+// A separate indexed load followed immediately by a register jump/call is the
+// register form of the memory-indirect transfer above.  Requiring a proven
+// jump-table maximum avoids extending the evidence into adjacent code-looking
+// constants even when they form one larger address array.
+control_flow_code_pointer_array_member(EA,Pt_size):-
+    arch.pointer_size(Pt_size),
+    address_array_aux(EA,Pt_size,"code",TableStart),
+    jump_table_element_access(LoadEA,Pt_size,TableStart,_),
+    jump_table_max(TableStart,TableEnd),
+    EA <= TableEnd,
+    arch.load(LoadEA,_,_,DstReg,_,_,_,_),
+    !ambiguous_jump_table_load(LoadEA),
+    reg_def_use.def_used(LoadEA,DstReg,TransferEA,_),
+    (
+        reg_call(TransferEA,DstReg)
+        ;
+        reg_jump(TransferEA,DstReg)
+    ),
+    data_object_candidate(EA,Pt_size,"symbol"),
+    address_in_data_refined(EA,Dest),
+    code(Dest),
+    !function_inference.function_entry_initial(Dest),
+    !defined_symbol(Dest,_,_,_,_,_,_,_,_),
+    !interior_code_pointer_used_for_control_flow(EA,Pt_size).
+
+// A memory-indirect jump or call consumes its table entry without first
+// loading it into a general-purpose register.  In particular, an x86 switch
+// may use `jmp *table(,index,ptrsize)`: jump-table analysis identifies the
+// table base and access width, but preferred_data_access is intentionally not
+// populated for the transfer instruction.  Preserve every member of the
+// exact contiguous all-code array addressed by that transfer.
+control_flow_code_pointer_array_member(EA,Pt_size):-
+    arch.pointer_size(Pt_size),
+    address_array_aux(EA,Pt_size,"code",InitialEA),
+    jump_table_element_access(TransferEA,Pt_size,InitialEA,_),
+    (
+        indirect_call(TransferEA)
+        ;
+        indirect_jump(TransferEA)
+    ),
+    data_object_candidate(EA,Pt_size,"symbol"),
+    address_in_data_refined(EA,Dest),
+    code(Dest),
+    !function_inference.function_entry_initial(Dest),
+    !defined_symbol(Dest,_,_,_,_,_,_,_,_),
+    !interior_code_pointer_used_for_control_flow(EA,Pt_size).
+
+data_object_point(EA,Pt_size,"symbol",10,
+                  "member of code-pointer array used for control flow"):-
+    control_flow_code_pointer_array_member(EA,Pt_size).
+
 data_object_point(EA,Pt_size,"symbol",-2,"potentially bitmask"):-
     data_object_candidate(EA,Pt_size,"symbol"),
     EA % Pt_size = 0,
@@ -870,6 +1901,263 @@ data_object_point(EA,Pt_size,"symbol",-1,"overlaps string: likely spurious"):-
     address_in_data_overlaps_string(EA,EAString),
     ascii_string(EAString,End),
     End - EAString > 4,
+    address_in_data_refined(EA,Dest),
+    !defined_symbol(Dest,_,_,_,_,_,_,_,_).
+
+// A short NUL-terminated text field followed by padding can occupy exactly one
+// pointer-sized slot.  Its little-endian bytes may accidentally equal a mapped
+// address even though the text is not a pointer (short format and algorithm
+// names are common examples).  An independent code or aligned data reference
+// to the start of the field establishes that the bytes are used as a string;
+// unlike fixed-width name pools, an isolated compiler literal need not have an
+// adjacent string.  Pointer fields can have the same printable low bytes and
+// can also be reached from code, so preserve candidates with a relocation,
+// pointer-width source access, or pointer-array structure.  Source alignment
+// and the absence of label conflicts give the remaining candidate a weak
+// positive score, so add enough negative evidence to keep it literal.  Exact
+// target symbols remain authoritative.  The raw data reference form is
+// intentionally source-side evidence only: option and name tables commonly
+// point at these strings even when no instruction materializes the string
+// address directly.
+.decl short_string_source_reference(EA:address)
+
+short_string_source_reference(EA):-
+    symbolic_operand(_,_,EA,"data").
+
+short_string_source_reference(EA):-
+    arch.pointer_size(Pt_size),
+    address_in_data_refined(RefEA,EA),
+    RefEA % Pt_size = 0,
+    RefEA != EA.
+
+// A descriptor table can begin with an anonymous-string pointer whose low
+// little-endian bytes themselves form a short NUL-terminated string.  A code
+// reference to the table base then supplies exactly the source-side evidence
+// used by the short-string collision guard below, so the leading pointer can
+// lose even though the same field is correctly retained in every later
+// record.  Recover only the leading field of a nonzero OBJECT when five
+// records repeat the same exact inferred-string target at one pointer-aligned
+// stride.  Four records are deliberately insufficient, and original symbol
+// or nested-OBJECT boundaries split the pattern.
+.decl repeated_string_pointer_source_boundary_between(
+          Beg:address,End:address)
+
+repeated_string_pointer_source_boundary_between(Beg,End):-
+    arch.pointer_size(Pt_size),
+    data_object_candidate(Beg,Pt_size,"symbol"),
+    data_object_candidate(End,Pt_size,"symbol"),
+    defined_symbol(Boundary,_,_,_,_,_,_,_,_),
+    Boundary > Beg,
+    Boundary <= End.
+
+repeated_string_pointer_source_boundary_between(Beg,End):-
+    arch.pointer_size(Pt_size),
+    data_object_candidate(Beg,Pt_size,"symbol"),
+    data_object_candidate(End,Pt_size,"symbol"),
+    defined_symbol(ObjectBeg,ObjectSize,"OBJECT",_,_,_,_,_,_),
+    ObjectSize > 0,
+    ObjectBeg+ObjectSize > Beg,
+    ObjectBeg+ObjectSize <= End.
+
+.decl leading_repeated_string_pointer_record(EA:address)
+
+leading_repeated_string_pointer_record(EA):-
+    arch.pointer_size(Pt_size),
+    data_object_candidate(EA,Pt_size,"symbol"),
+    address_in_data_refined(EA,Dest),
+    string_candidate_refined(Dest,_,_),
+    innermost_source_object_containing_candidate(
+        EA,Pt_size,EA,SrcSize),
+    ascii_string(EA,StringEnd),
+    StringEnd >= EA+3,
+    StringEnd < EA+Pt_size,
+    short_string_source_reference(EA),
+    !relocation(EA,_,_,_,_,_,_),
+    !preferred_data_access(EA,Pt_size,_),
+    !preferred_data_access(EA,0,_),
+    !address_array(EA,_,_),
+    data_object_candidate(EA1,Pt_size,"symbol"),
+    address_in_data_refined(EA1,Dest),
+    EA1 > EA,
+    Stride = EA1-EA,
+    Stride >= 4*Pt_size,
+    Stride % Pt_size = 0,
+    data_object_candidate(EA1+Stride,Pt_size,"symbol"),
+    address_in_data_refined(EA1+Stride,Dest),
+    data_object_candidate(EA1+2*Stride,Pt_size,"symbol"),
+    address_in_data_refined(EA1+2*Stride,Dest),
+    data_object_candidate(EA1+3*Stride,Pt_size,"symbol"),
+    address_in_data_refined(EA1+3*Stride,Dest),
+    EA+4*Stride+Pt_size <= EA+SrcSize,
+    !repeated_string_pointer_source_boundary_between(
+        EA,EA+4*Stride).
+
+data_object_point(EA,Pt_size,"symbol",2,
+                  "leading field in repeated string-pointer records"):-
+    arch.pointer_size(Pt_size),
+    data_object_candidate(EA,Pt_size,"symbol"),
+    leading_repeated_string_pointer_record(EA).
+
+// A pointer-width window can begin strictly inside a longer referenced string.
+// On little-endian executables, a printable suffix followed by the string
+// terminator and padding can accidentally equal the exact address of a real
+// symbol.  Destination identity still does not establish a source-field
+// boundary, even when the suffix happens to begin at a naturally aligned
+// address.  Require a substantial printable prefix and an independent
+// reference to the actual string start, then reject only source windows with
+// no relocation, pointer-width access, or pointer-array evidence.  A genuine
+// packed pointer remains recoverable through any of those anchors.
+.decl unanchored_pointer_inside_referenced_string(
+          EA:address,Pt_size:unsigned)
+
+unanchored_pointer_inside_referenced_string(EA,Pt_size):-
+    arch.pointer_size(Pt_size),
+    data_object_candidate(EA,Pt_size,"symbol"),
+    ascii_string(StringEA,End),
+    EA >= StringEA+3,
+    EA < End,
+    short_string_source_reference(StringEA),
+    !defined_symbol(EA,_,_,_,_,_,_,_,_),
+    !relocation(EA,_,_,_,_,_,_),
+    !preferred_data_access(EA,Pt_size,_),
+    !preferred_data_access(EA,0,_),
+    !address_array(EA,_,_).
+
+data_object_point(EA,Pt_size,"symbol",-5,
+                  "source begins inside referenced string"):-
+    unanchored_pointer_inside_referenced_string(EA,Pt_size).
+
+// The converse overlap occurs when one or more zero padding bytes immediately
+// precede a referenced short string.  On little-endian executables the whole
+// pointer-width window can then equal an exact low code address: for example,
+// 00 44 48 00... is both 0x484400 and the padding-plus-"DH" bytes used by an
+// OpenSSL name table.  Relayout would otherwise change the string when the
+// unrelated code symbol moves.  Recover only a bounded all-zero prefix and an
+// independently referenced string suffix, and preserve candidates that have
+// their own source symbol, relocation, pointer-width access, or array shape.
+.decl candidate_zero_prefix(
+          Beg:address,End:address,Count:unsigned,Pt_size:unsigned)
+
+candidate_zero_prefix(Beg,Beg+1,1,Pt_size):-
+    arch.pointer_size(Pt_size),
+    data_object_candidate(Beg,Pt_size,"symbol"),
+    data_byte(Beg,0).
+
+candidate_zero_prefix(Beg,End+1,Count+1,Pt_size):-
+    candidate_zero_prefix(Beg,End,Count,Pt_size),
+    Count < Pt_size-1,
+    data_byte(End,0).
+
+.decl unanchored_pointer_with_referenced_string_suffix(
+          EA:address,Pt_size:unsigned)
+
+unanchored_pointer_with_referenced_string_suffix(EA,Pt_size):-
+    arch.pointer_size(Pt_size),
+    data_object_candidate(EA,Pt_size,"symbol"),
+    candidate_zero_prefix(EA,StringEA,PrefixSize,Pt_size),
+    PrefixSize < Pt_size,
+    ascii_string(StringEA,End),
+    End >= StringEA+2,
+    StringEA < EA+Pt_size,
+    short_string_source_reference(StringEA),
+    !defined_symbol(EA,_,_,_,_,_,_,_,_),
+    !relocation(EA,_,_,_,_,_,_),
+    !preferred_data_access(EA,Pt_size,_),
+    !preferred_data_access(EA,0,_),
+    !address_array(EA,_,_).
+
+// Selection accepts a total score of zero.  Use -6 so the strongest otherwise
+// unanchored aligned case (bias -2, alignment +2, exact target +5) remains
+// below that threshold; the referenced suffix itself creates a label conflict
+// and therefore prevents the ordinary no-conflict point.
+data_object_point(EA,Pt_size,"symbol",-6,
+                  "zero prefix overlaps referenced string"):-
+    unanchored_pointer_with_referenced_string_suffix(EA,Pt_size).
+
+data_object_point(EA,Pt_size,"symbol",-2,
+                  "short string prefix resembles address"):-
+    data_object_candidate(EA,Pt_size,"symbol"),
+    EA % Pt_size = 0,
+    ascii_string(EA,End),
+    End >= EA+3,
+    End < EA+Pt_size,
+    short_string_source_reference(EA),
+    address_in_data_refined(EA,Dest),
+    !defined_symbol(Dest,_,_,_,_,_,_,_,_),
+    !relocation(EA,_,_,_,_,_,_),
+    !preferred_data_access(EA,Pt_size,_),
+    !preferred_data_access(EA,0,_),
+    !address_array(EA,_,_).
+
+// A named multiword object can begin with a pointer to an anonymous string.
+// When the target address has three printable low bytes, the stored pointer
+// is also a plausible short string at the source and the guard above makes the
+// source string win.  An exact OBJECT start establishes the field boundary,
+// while the independently inferred string establishes the destination type.
+// Recover only this direct conflict: the source must itself be the referenced
+// short-string candidate, the target must have no original symbol, and the
+// object must not repeat the same value in later slots.  The latter keeps a
+// short run of address-shaped scalar records literal; the stronger existing
+// repeated-record rule independently handles a five-record pointer pattern.
+// Scalar or pointer access evidence, relocations, and pointer arrays remain
+// governed by their existing rules.  Three points are needed because the
+// symbol starts at -1 and the conflicting source string scores +1.
+.decl named_object_has_later_same_pointer(
+          EA:address,Pt_size:unsigned,Dest:address)
+
+named_object_has_later_same_pointer(EA,Pt_size,Dest):-
+    data_object_candidate(EA,Pt_size,"symbol"),
+    address_in_data_refined(EA,Dest),
+    defined_symbol(EA,SrcSize,"OBJECT",_,_,_,_,_,_),
+    SrcSize > 0,
+    data_object_candidate(Later,Pt_size,"symbol"),
+    address_in_data_refined(Later,Dest),
+    Later > EA,
+    Later+Pt_size <= EA+SrcSize.
+
+data_object_point(EA,Pt_size,"symbol",3,
+                  "named object begins with anonymous string pointer"):-
+    arch.pointer_size(Pt_size),
+    data_object_candidate(EA,Pt_size,"symbol"),
+    address_in_data_refined(EA,Dest),
+    string_candidate_refined(Dest,_,_),
+    !defined_symbol(Dest,_,_,_,_,_,_,_,_),
+    defined_symbol(EA,SrcSize,"OBJECT",_,_,_,_,_,_),
+    SrcSize >= 2*Pt_size,
+    SrcSize % Pt_size = 0,
+    ascii_string(EA,End),
+    End >= EA+3,
+    End < EA+Pt_size,
+    short_string_source_reference(EA),
+    !named_object_has_later_same_pointer(EA,Pt_size,Dest),
+    !relocation(EA,_,_,_,_,_,_),
+    !preferred_data_access(EA,Pt_size,_),
+    !preferred_data_access(EA,0,_),
+    !address_array(EA,_,_).
+
+// Fixed-width name tables commonly store a short NUL-terminated string in
+// each pointer-sized slot and zero-fill the remainder.  On little-endian
+// binaries, three printable bytes plus the terminator can also be a plausible
+// low address (for example, "MD5\0" is 0x35444d).  Treat the middle member of
+// a three-slot run as text even when it has no direct code reference.  Requiring
+// printable strings at the exact neighboring slot starts distinguishes this
+// layout from an isolated address candidate; genuine address arrays retain
+// their independent array points, and relocations or exact target symbols
+// remain authoritative.
+data_object_point(EA,Pt_size,"symbol",-2,
+                  "short string in fixed-width string pool"):-
+    data_object_candidate(EA,Pt_size,"symbol"),
+    EA >= Pt_size,
+    EA % Pt_size = 0,
+    ascii_string(EA-Pt_size,PrevEnd),
+    PrevEnd >= EA-Pt_size+3,
+    PrevEnd < EA,
+    ascii_string(EA,End),
+    End >= EA+3,
+    End < EA+Pt_size,
+    ascii_string(EA+Pt_size,NextEnd),
+    NextEnd >= EA+Pt_size+3,
+    NextEnd < EA+2*Pt_size,
     address_in_data_refined(EA,Dest),
     !defined_symbol(Dest,_,_,_,_,_,_,_,_).
 
@@ -1013,8 +2301,6 @@ code_pointer_in_data(EA,Val):-
     symbolic_data(EA,_,Val),
     block(Val).
 
-
-
 ///////////////////////////////////////////////////////////////////////////////////////////
 // Final label decision
 
@@ -1060,6 +2346,11 @@ data_object_boundary(EA):-
     symbol_minus_symbol(EA,_,_,_,_,_);
     symbolic_expr_from_relocation(EA,_,_,_,_);
     moved_data_label(EA,_,_,_).
+
+// Keep a recovered zero-prefix alignment anchor as its own DataBlock.  The
+// alignment builder can attach AuxData only to an existing block boundary.
+data_object_boundary(Anchor):-
+    zero_prefixed_code_object_alignment(Anchor,_,_,_).
 
 /////////////////////////////////////////////////////////////////////////////////
 // This facts specifies that a label should be printed in the .bss section for

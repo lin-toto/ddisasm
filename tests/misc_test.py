@@ -515,7 +515,24 @@ class AuxDataTests(unittest.TestCase):
             # alignment=16: `data128.1`~`data128.7`
             self.assertEqual(alignment_list.count(16), 7)
             # alignment=32: `data256`
-            self.assertEqual(alignment_list.count(32), 1)
+            # `data256.composite` is the aligned target of a composite access;
+            # `data256.base` must carry the same alignment so a fixed +32
+            # displacement remains valid after re-layout.
+            self.assertEqual(alignment_list.count(32), 4)
+
+            base_sym = next(m.symbols_named("data256.base"))
+            target_sym = next(m.symbols_named("data256.composite"))
+            self.assertEqual(
+                m.aux_data["alignment"].data.get(base_sym.referent), 32
+            )
+            self.assertEqual(
+                m.aux_data["alignment"].data.get(target_sym.referent), 32
+            )
+
+            indirect_sym = next(m.symbols_named("data256.indirect"))
+            self.assertEqual(
+                m.aux_data["alignment"].data.get(indirect_sym.referent), 32
+            )
 
     @unittest.skipUnless(
         platform.system() == "Linux", "This test is linux only."
@@ -545,8 +562,110 @@ class AuxDataTests(unittest.TestCase):
                 if block.address > main_block.address
             ]
 
-            # alignment=64: `data512`
-            self.assertEqual(alignment_list.count(64), 1)
+            # alignment=64: the VMOVAPS table and both AVX-512 integer
+            # VMOVDQA element-width forms.
+            self.assertEqual(alignment_list.count(64), 3)
+            for symbol_name in ("data512", "data512.dqa32", "data512.dqa64"):
+                symbol = next(m.symbols_named(symbol_name))
+                self.assertEqual(
+                    m.aux_data["alignment"].data.get(symbol.referent), 64
+                )
+
+    @unittest.skipUnless(
+        platform.system() == "Linux", "This test is linux only."
+    )
+    def test_zero_prefixed_code_object_alignment(self):
+        """
+        Preserve an alignment anchor before a code-section OBJECT when the
+        object's nonzero residue within that aligned region is semantic.
+        """
+        binary = Path("ex")
+        with cd(ex_asm_dir / "ex_zero_prefixed_code_object_alignment"):
+            self.assertTrue(compile("gcc", "g++", "-O0", []))
+            self.assertTrue(test())
+
+            result = disassemble(binary)
+            ir = result.ir()
+            module = ir.modules[0]
+            table = next(module.symbols_named("masked_table"))
+            self.assertIsInstance(table.referent, gtirb.DataBlock)
+            self.assertEqual(table.referent.address % 256, 64)
+
+            anchor_address = table.referent.address - 64
+            anchors = list(module.data_blocks_on(anchor_address))
+            self.assertEqual(len(anchors), 1)
+            self.assertEqual(anchors[0].size, 64)
+            self.assertEqual(
+                module.aux_data["alignment"].data.get(anchors[0]), 256
+            )
+
+            weaker_table = next(
+                module.symbols_named("weaker_aligned_table")
+            )
+            self.assertIsInstance(weaker_table.referent, gtirb.DataBlock)
+            self.assertEqual(weaker_table.referent.address % 256, 96)
+            weaker_anchor_address = weaker_table.referent.address - 96
+            weaker_anchors = list(
+                module.data_blocks_on(weaker_anchor_address)
+            )
+            self.assertEqual(len(weaker_anchors), 1)
+            self.assertEqual(weaker_anchors[0].size, 64)
+            self.assertEqual(
+                module.aux_data["alignment"].data.get(
+                    weaker_anchors[0]
+                ),
+                128,
+            )
+            weaker_suffix = list(
+                module.data_blocks_on(weaker_anchor_address + 64)
+            )
+            self.assertEqual(len(weaker_suffix), 1)
+            self.assertEqual(weaker_suffix[0].size, 32)
+            self.assertLessEqual(
+                module.aux_data["alignment"].data.get(
+                    weaker_suffix[0], 1
+                ),
+                128,
+            )
+
+            binary_print(result.ir_path, binary)
+            self.assertTrue(test())
+
+    @unittest.skipUnless(
+        platform.system() == "Linux", "This test is linux only."
+    )
+    def test_low_bit_selected_table_alignment(self):
+        """Preserve an unlabeled table alignment encoded by address math."""
+        binary = Path("ex")
+        with cd(ex_asm_dir / "ex_low_bit_selected_table_alignment"):
+            self.assertTrue(compile("gcc", "g++", "-O0", []))
+            self.assertTrue(test())
+
+            result = disassemble(binary)
+            module = result.ir().modules[0]
+            aligned_data = [
+                block
+                for block, alignment in module.aux_data["alignment"].data.items()
+                if isinstance(block, gtirb.DataBlock) and alignment == 256
+            ]
+            self.assertEqual(len(aligned_data), 2)
+            base, table = sorted(aligned_data, key=lambda block: block.address)
+            self.assertEqual(table.address - base.address, 0x800)
+            for block in (base, table):
+                self.assertEqual(block.address % 256, 0)
+                self.assertEqual(
+                    module.aux_data["alignment"].data.get(block), 256
+                )
+                self.assertFalse(
+                    any(
+                        symbol.referent is block
+                        and not symbol.name.startswith(".L_")
+                        for symbol in module.symbols
+                    )
+                )
+
+            binary_print(result.ir_path, binary)
+            self.assertTrue(test())
 
     @unittest.skipUnless(
         platform.system() == "Linux", "This test is linux only."

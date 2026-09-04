@@ -55,6 +55,8 @@ bar:
 .LENDCIE_bar:
     .long .LENDFDE_bar-.LSTARTFDE_bar
 .LSTARTFDE_bar:
+.type exact_fde_start, @object
+exact_fde_start:
     .long .LSTARTFDE_bar-.LSTARTFRAME_bar
     # `LSTART_' is subtracted 1 as debuggers assume a `call' here.
     .long (.LSTART_bar-1)-.
@@ -65,7 +67,16 @@ bar:
 
     .align 8
 .LENDFDE_bar:
-    .previous
+.previous
+
+.globl exception_symbol_immediate
+.type exception_symbol_immediate, @function
+exception_symbol_immediate:
+    # GNU ld's .eh_frame FDE relocation accounts for the four-byte length
+    # field.  Subtract it here so the linked immediate names the exact symbol,
+    # matching crtbegin's __EH_FRAME_BEGIN__ pattern.
+    mov EDI, OFFSET exact_fde_start-4
+    ret
 
 .globl main
 .align 16

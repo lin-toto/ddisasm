@@ -67,6 +67,17 @@ exception_section(".gcc_except_table").
 special_data_section(Section):-
     exception_section(Section).
 
+// Dynamic relocation records are linker/runtime metadata with fixed scalar
+// fields, not ordinary pointer-bearing application data.  Treat both ELF
+// relocation section forms as special even when they are mapped at runtime.
+special_data_section(Section):-
+    section_type(Section,Type),
+    (
+        elf_section_type("RELA",Type)
+        ;
+        elf_section_type("REL",Type)
+    ).
+
 special_data_section(".dynamic").
 special_data_section(".fini_array").
 special_data_section(".got").
