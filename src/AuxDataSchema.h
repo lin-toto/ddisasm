@@ -162,13 +162,6 @@ namespace gtirb
             typedef std::vector<uint64_t> Type;
         };
 
-        /// \brief Auxiliary data describing architecture information
-        struct ArchInfo
-        {
-            static constexpr const char* Name = "archInfo";
-            typedef std::map<std::string, std::string> Type;
-        };
-
         /// \brief Auxiliary data listing of bytes appended to the binary that
         /// are not loaded to memory.
         struct Overlay
