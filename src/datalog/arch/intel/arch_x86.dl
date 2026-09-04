@@ -291,6 +291,11 @@ operation_alignment_required("MOVNTDQ").
 operation_alignment_required("MOVNTDQA").
 
 operation_alignment_required("VMOVDQA").
+// AVX-512 gives the aligned integer move separate element-width mnemonics.
+// Like VMOVDQA, both forms require the memory operand to be aligned to the
+// full vector width (16, 32, or 64 bytes depending on XMM/YMM/ZMM).
+operation_alignment_required("VMOVDQA32").
+operation_alignment_required("VMOVDQA64").
 operation_alignment_required("VMOVAPS").
 operation_alignment_required("VMOVAPD").
 operation_alignment_required("VMOVNTPS").
