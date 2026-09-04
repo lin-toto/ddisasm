@@ -7,7 +7,9 @@ TARGETS=ex out.txt
 all: out.txt
 check: out.txt
 ex: src.s
-	$(CC) -no-pie -Wl,--section-start=.collision_data=0x700000 -Wl,--section-start=.collision_code=0x710000 $^ -o $@
+	$(CC) -no-pie -Wl,-z,noseparate-code \
+		-Wl,--section-start=.pointer_target=0x820030 \
+		$^ -o $@
 out.txt: ex
 	$(EXEC) $^ > $@
 clean:

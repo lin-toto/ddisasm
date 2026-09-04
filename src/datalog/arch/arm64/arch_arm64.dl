@@ -127,6 +127,15 @@ data_access_size(Operation,as(DestReg,register),Size):-
 data_access_size("LDR",as(Reg,register),Size):-
     register_size_bytes(Reg, Size).
 
+// Capstone likewise leaves the memory operand of a paired load at the
+// decoder's 32-bit default.  LDP transfers one element per destination
+// register, so derive the element width from either (same-width) register.
+// Without this override, `ldp xN, xM, [...]` is recorded as two 4-byte data
+// accesses and can make an aligned 8-byte pointer field look like two scalar
+// cells during data symbolization.
+data_access_size("LDP",as(Reg,register),Size):-
+    register_size_bytes(Reg, Size).
+
 // ADD reg, reg, #imm
 reg_arithmetic_operation(EA,Dst,Src,1,Immediate):-
     instruction(EA,_,_,"ADD",Op1,Op2,Op3,0,_,_),

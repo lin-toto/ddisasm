@@ -170,6 +170,9 @@ tests:
   - name: ex_stack_split_load
     <<: *assembly
 
+  - name: ex_completed_split_load_spill
+    <<: *assembly
+
   - name: ex_adr_not_split_load
     <<: *assembly
 

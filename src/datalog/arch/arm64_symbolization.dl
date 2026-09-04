@@ -139,23 +139,39 @@ and Reg would be `x1`
 */
 .decl adrp_used(EA:address,Reg:register,UsedEA:address,Dest:address)
 
+// Track an ADR/ADRP page value only through operations that preserve it
+// exactly.  In particular, stop at ADD: that instruction is itself the LO12
+// tail which completes the address.  This explicit provenance avoids treating
+// a completed page-aligned pointer as a fresh page base after a register copy
+// or stack spill/reload.
+.decl adrp_page_value_flow(
+          ADREA:address,EARegDef:address,Reg:register,Dest:address)
+
+adrp_page_value_flow(EA,EA,Reg,Dest):-
+    arch.adr_dest(EA,Reg,Dest).
+
+// Register copies preserve an uncompleted ADRP page value.
+adrp_page_value_flow(ADREA,MoveEA,DstReg,Dest):-
+    adrp_page_value_flow(ADREA,PrevEA,SrcReg,Dest),
+    reg_def_use.def_used(PrevEA,SrcReg,MoveEA,_),
+    arch.move_reg_reg(MoveEA,DstReg,SrcReg).
+
+// Preserve the page-base provenance across an exact stack spill/reload.
+adrp_page_value_flow(ADREA,LoadEA,DstReg,Dest):-
+    adrp_page_value_flow(ADREA,PrevEA,SrcReg,Dest),
+    reg_def_use.def_used(PrevEA,SrcReg,StoreEA,_),
+    arch.store(StoreEA,_,_,SrcReg,StoreBase,"NONE",_,StoreOffset),
+    stack_def_use.def_used(
+        StoreEA,[StoreBase,StoreOffset],
+        LoadEA,[LoadBase,LoadOffset],_),
+    arch.load(LoadEA,_,_,DstReg,LoadBase,"NONE",_,LoadOffset).
+
 adrp_used(EA,Reg,UsedEA,Dest):-
-    const_value_reg_used(UsedEA,EA,EARegDef,Reg,as(Dest,number)),
-    arch.adr_dest(EA,_,Dest),
-    // Ensure that Dest is page-aligned - otherwise it's not a substituted
-    // adrp, and can't be part of a split load.
-    Dest band 0xFFF = 0,
-    // The `add` of a split load may have an immediate of zero if the target
-    // is page-aligned. If that address then has an addition offset added to
-    // it, e.g.:
-    //      adrp x8, .L_c4a000
-    //      add x8,x8, :lo12:.L_c4a000
-    //      add x8,x8,#8
-    // then we will generate a false positive in the second `add`, since the
-    // first is effectively a move. We only want to apply :lo12: to the first
-    // "ADD" instruction.
-    instruction_get_operation(EARegDef,Operation),
-    Operation != "ADD".
+    adrp_page_value_flow(EA,EARegDef,Reg,Dest),
+    reg_def_use.def_used(EARegDef,Reg,UsedEA,_),
+    // Ensure that Dest is page-aligned - otherwise it is an exact ADR value,
+    // not a page base awaiting a split-load tail.
+    Dest band 0xFFF = 0.
 
 /**
 An instruction which could be the second half of a split load.
@@ -193,8 +209,19 @@ split_load_for_symbolization(EA,UsedEA,as(as(Base,number)+Offset,address),Type):
     adrp_used(EA,Reg,UsedEA,Base),
     split_load_tail(UsedEA,Offset,Reg,Type).
 
+// ADR encodes the exact byte address in its immediate.  Keep that exact base
+// when the value is subsequently used with an offset.  Rebasing the ADR to
+// Base+Offset and retaining the offset in the consumer applies the offset
+// twice.  ADRP is different: it encodes only a page, so selecting the final
+// destination here remains layout-neutral and lets the consumer carry LO12.
+split_load_operand(EA, 1, as(Base,address)) :-
+    split_load_for_symbolization(EA, _, _, _),
+    instruction_get_operation(EA,"ADR"),
+    arch.adr_dest(EA,_,Base).
+
 split_load_operand(EA, 1, as(Dest,address)) :-
-    split_load_for_symbolization(EA, _, Dest, _).
+    split_load_for_symbolization(EA, _, Dest, _),
+    instruction_get_operation(EA,"ADRP").
 
 split_load_operand(EA, 1, as(Dest,address)) :-
     split_load_for_symbolization(_, EA, Dest, "LDR/STR").
@@ -490,6 +517,107 @@ symbolic_operand_candidate(EA, 1, Dest, Type):-
     movz_movk_member(EA, EA_first, EA_last),
     movz_movk_insn(EA, _, _, ShiftMask, _),
     movz_movk_shift_group(ShiftMask, Group).
+
+// Track only operations that preserve the address represented by a completed
+// MOVZ/MOVK chain.  The generic def_used_for_address relation is deliberately
+// broader: it propagates through arithmetic and therefore also classifies an
+// integer that is shifted/masked and later used as an array index as "Memory".
+// That broad relation is useful elsewhere, but is not sufficient evidence that
+// the original MOVZ/MOVK constant itself is a pointer.
+.decl movz_movk_address_value_flow(
+          EA_first:address,EA_last:address,EA_def:address,Reg:register)
+
+movz_movk_address_value_flow(EA_first,EA_last,EA_last,Reg):-
+    movz_movk_complete(EA_first,EA_last,_),
+    movz_movk_insn(EA_last,Reg,_,_,_).
+
+// Register copies preserve the represented address.
+movz_movk_address_value_flow(EA_first,EA_last,EA_move,DstReg):-
+    movz_movk_address_value_flow(EA_first,EA_last,EA_def,SrcReg),
+    reg_def_use.def_used(EA_def,SrcReg,EA_move,_),
+    arch.move_reg_reg(EA_move,DstReg,SrcReg).
+
+// Adding a constant is ordinary pointer arithmetic.  Other arithmetic,
+// shifts, masks, and scaled-index calculations intentionally do not flow.
+movz_movk_address_value_flow(EA_first,EA_last,EA_add,DstReg):-
+    movz_movk_address_value_flow(EA_first,EA_last,EA_def,SrcReg),
+    reg_def_use.def_used(EA_def,SrcReg,EA_add,_),
+    arch.reg_arithmetic_operation(EA_add,DstReg,SrcReg,1,_).
+
+// Preserve exact stack spill/reload provenance for address materializations.
+movz_movk_address_value_flow(EA_first,EA_last,EA_load,DstReg):-
+    movz_movk_address_value_flow(EA_first,EA_last,EA_def,SrcReg),
+    reg_def_use.def_used(EA_def,SrcReg,EA_store,_),
+    arch.store(EA_store,_,_,SrcReg,StoreBase,"NONE",_,StoreOffset),
+    stack_def_use.def_used(
+        EA_store,[StoreBase,StoreOffset],
+        EA_load,[LoadBase,LoadOffset],_),
+    arch.load(EA_load,_,_,DstReg,LoadBase,"NONE",_,LoadOffset).
+
+.decl movz_movk_demonstrated_address_use(
+          EA_first:address,EA_last:address)
+
+movz_movk_demonstrated_address_use(EA_first,EA_last):-
+    movz_movk_address_value_flow(EA_first,EA_last,EA_def,Reg),
+    reg_def_use.def_used(EA_def,Reg,EA_use,_),
+    arch.memory_access(
+        _,EA_use,_,_,_,as(Reg,reg_nullable),_,_,_).
+
+movz_movk_demonstrated_address_use(EA_first,EA_last):-
+    movz_movk_address_value_flow(EA_first,EA_last,EA_def,Reg),
+    reg_def_use.def_used(EA_def,Reg,EA_use,_),
+    (
+        reg_call(EA_use,Reg)
+        ;
+        reg_jump(EA_use,Reg)
+    ).
+
+// A completed MOVZ/MOVK value that merely lands on an unlabeled instruction
+// can be a scalar bit mask rather than an address.  This is especially easy
+// to misclassify in a non-PIE executable because ordinary flag constants may
+// numerically overlap .text.  A direct logical use whose result is not used to
+// form an address is scalar evidence.  Keep the penalty modest: any independent
+// address-use score still retains symbolization, as do relocations, exact
+// target symbols, and the value-preserving address flows above.
+.decl movz_movk_scalar_logical_use(
+          EA_first:address,EA_last:address)
+
+movz_movk_scalar_logical_use(EA_first,EA_last):-
+    movz_movk_address_value_flow(EA_first,EA_last,EA_def,Reg),
+    reg_def_use.def_used(EA_def,Reg,EA_logic,_),
+    instruction_get_operation(EA_logic,Operation),
+    arch.logic_operation(Operation),
+    instruction_get_dest_op(EA_logic,_,DestOp),
+    op_regdirect_contains_reg(DestOp,ResultReg),
+    !def_used_for_address(EA_logic,ResultReg,_).
+
+symbolic_operand_point(EA,1,-1,
+                       "MOVZ/MOVK scalar points inside unlabeled code"):-
+    movz_movk_member(EA,EA_first,EA_last),
+    symbolic_operand_candidate(EA,1,Dest,"code"),
+    !instruction_has_relocation(EA,_),
+    !defined_symbol(Dest,_,_,_,_,_,_,_,_),
+    !movz_movk_demonstrated_address_use(EA_first,EA_last),
+    movz_movk_scalar_logical_use(EA_first,EA_last).
+
+// A 32/64-bit scalar assembled by MOVZ+MOVK can accidentally equal an
+// address strictly inside a nonzero data OBJECT.  Symbolizing that coincidence
+// is not layout-neutral: a later rewrite moves the object, and the linker then
+// changes the intended integer.  The -2 score deliberately dominates the
+// generic +1 used-for-address score when that score came only from a scalar
+// index computation.  Relocations, exact target symbols, and demonstrated
+// address-value flow remain intact.
+symbolic_operand_point(EA,1,-2,
+                       "MOVZ/MOVK scalar points inside unlabeled data object"):-
+    movz_movk_member(EA,EA_first,EA_last),
+    symbolic_operand_candidate(EA,1,Dest,"data"),
+    !instruction_has_relocation(EA,_),
+    !movz_movk_demonstrated_address_use(EA_first,EA_last),
+    defined_symbol(Beg,Size,"OBJECT",_,_,_,_,_,_),
+    Size > 0,
+    Dest > Beg,
+    Dest < Beg+Size,
+    !defined_symbol(Dest,_,_,_,_,_,_,_,_).
 
 may_have_symbolic_immediate(EA, as(Value, address)):-
     movz_movk_complete(EA_first, EA_last, Value),

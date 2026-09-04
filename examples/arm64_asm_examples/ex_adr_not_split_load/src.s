@@ -18,6 +18,13 @@ main:
     add x0,x8,#8
     bl printf
 
+    # ADR encodes an exact address even when that address happens to be page
+    # aligned.  The later field offset must not be folded back into the ADR,
+    # or reconstruction applies the offset twice.
+    adr x8,page_struct
+    add x0,x8,#64
+    bl printf
+
 .exit:
     ldp fp,lr,[sp],#64
     mov x0, #0
@@ -31,3 +38,15 @@ main:
 my_struct:
     .quad 1234
     .asciz "hello\n"
+
+.balign 4096
+.global page_struct
+.type page_struct, %object
+page_struct:
+    .zero 64
+page_message:
+    .asciz "page-aligned\n"
+    .zero 50
+double_offset_message:
+    .asciz "double-offset\n"
+.size page_struct, .-page_struct
