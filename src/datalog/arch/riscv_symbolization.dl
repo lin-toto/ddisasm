@@ -806,7 +806,8 @@ symbolic_expr(EAHi+InstrOffset,Size,Symbol,0):-
     !symbol_minus_symbol_from_relocation(EAHi+InstrOffset,_,_,_,_,_),
     !symbol_minus_symbol(EAHi+InstrOffset,_,_,_,_,_).
 
-symbolic_expr(EAHi+InstrOffset,Size,SymbolName,Offset):-
+symbolic_expr(EAHi+InstrOffset,Size,SymbolName,Offset),
+symbolic_expr_symbol_address(EAHi+InstrOffset,1,SymbolName,FinalDest):-
     riscv_pcrel_control_transfer(EAHi,EALo,_,Dest),
     !riscv_pcrel_plt_call(EAHi,EALo,_),
     instruction_immediate_offset(EAHi,1,InstrOffset,Size),
@@ -828,7 +829,8 @@ symbolic_expr(EAHi+InstrOffset,Size,SymbolName,Offset):-
     ),
     best_symexpr_symbol(FinalDest,SymbolName,SymbolLoc).
 
-symbolic_expr(EALo+InstrOffset,Size,SymbolName,0):-
+symbolic_expr(EALo+InstrOffset,Size,SymbolName,0),
+symbolic_expr_symbol_address(EALo+InstrOffset,1,SymbolName,EAHi):-
     riscv_pcrel_control_transfer(EAHi,EALo,IndexLo,_),
     !riscv_pcrel_plt_call(EAHi,EALo,_),
     instruction_immediate_offset(EALo,IndexLo,InstrOffset,Size),
@@ -842,7 +844,8 @@ symbolic_expr(EALo+InstrOffset,Size,SymbolName,0):-
 // Attach the LO expression to the whole instruction so a relayout can still
 // recompute the low 12 bits.  The RISC-V printer expands this alias back to
 // `jalr ra,reg,%pcrel_lo(anchor)` when the expression is present.
-symbolic_expr(EALo,Size,SymbolName,0):-
+symbolic_expr(EALo,Size,SymbolName,0),
+symbolic_expr_symbol_address(EALo,1,SymbolName,EAHi):-
     riscv_pcrel_control_transfer(EAHi,EALo,1,_),
     !riscv_pcrel_plt_call(EAHi,EALo,_),
     instruction(EALo,Size,_,"JALR",_,0,0,0,_,_),
@@ -867,7 +870,8 @@ symbolic_expr(EAHi+InstrOffset,Size,Symbol,Addend):-
     !symbol_minus_symbol_from_relocation(EAHi+InstrOffset,_,_,_,_,_),
     !symbol_minus_symbol(EAHi+InstrOffset,_,_,_,_,_).
 
-symbolic_expr(EAHi+InstrOffset,Size,SymbolName,Offset):-
+symbolic_expr(EAHi+InstrOffset,Size,SymbolName,Offset),
+symbolic_expr_symbol_address(EAHi+InstrOffset,1,SymbolName,FinalDest):-
     riscv_split_load(EAHi,_,_,Dest),
     !riscv_ambiguous_split_hi(EAHi),
     !riscv_split_load_got(EAHi,_,_,_,_),
@@ -895,7 +899,8 @@ symbolic_expr(EAHi+InstrOffset,Size,SymbolName,Offset):-
     ),
     best_symexpr_symbol(FinalDest,SymbolName,SymbolLoc).
 
-symbolic_expr(EAHi+InstrOffset,Size,SymbolName,Offset):-
+symbolic_expr(EAHi+InstrOffset,Size,SymbolName,Offset),
+symbolic_expr_symbol_address(EAHi+InstrOffset,1,SymbolName,FinalDest):-
     riscv_symbolic_absolute_split_load(EAHi,_,_,Dest),
     instruction_immediate_offset(EAHi,1,InstrOffset,Size),
     !symbolic_expr_from_relocation(EAHi+InstrOffset,_,_,_,_),
@@ -916,7 +921,8 @@ symbolic_expr(EAHi+InstrOffset,Size,SymbolName,Offset):-
     ),
     best_symexpr_symbol(FinalDest,SymbolName,SymbolLoc).
 
-symbolic_expr(EALo+InstrOffset,Size,SymbolName,0):-
+symbolic_expr(EALo+InstrOffset,Size,SymbolName,0),
+symbolic_expr_symbol_address(EALo+InstrOffset,1,SymbolName,EAHi):-
     riscv_split_load(EAHi,EALo,IndexLo,_),
     !riscv_ambiguous_split_hi(EAHi),
     (
@@ -928,7 +934,8 @@ symbolic_expr(EALo+InstrOffset,Size,SymbolName,0):-
     !symbol_minus_symbol(EALo+InstrOffset,_,_,_,_,_),
     riscv_pcrel_anchor_symbol(EAHi,SymbolName).
 
-symbolic_expr(EALo,4,SymbolName,0):-
+symbolic_expr(EALo,4,SymbolName,0),
+symbolic_expr_symbol_address(EALo,1,SymbolName,EAHi):-
     riscv_split_load_zero_addi_alias(EAHi,EALo,_),
     !riscv_ambiguous_split_hi(EAHi),
     !symbolic_expr_from_relocation(EALo,_,_,_,_),
@@ -942,7 +949,8 @@ symbolic_expr_attribute(EALo,"PCREL"):-
 symbolic_expr_attribute(EALo,"LO"):-
     riscv_split_load_zero_addi_alias(_,EALo,_).
 
-symbolic_expr(EALo,4,SymbolName,0):-
+symbolic_expr(EALo,4,SymbolName,0),
+symbolic_expr_symbol_address(EALo,1,SymbolName,Dest):-
     riscv_absolute_split_load_zero_addi_alias(EAHi,EALo,Dest),
     riscv_symbolic_absolute_split_load(EAHi,EALo,1,Dest),
     !symbolic_expr_from_relocation(EALo,_,_,_,_),
@@ -959,7 +967,8 @@ symbolic_expr_attribute(EALo,"LO"):-
     riscv_absolute_split_load_zero_addi_alias(EAHi,EALo,Dest),
     riscv_symbolic_absolute_split_load(EAHi,EALo,1,Dest).
 
-symbolic_expr(EALo+InstrOffset,Size,SymbolName,0):-
+symbolic_expr(EALo+InstrOffset,Size,SymbolName,0),
+symbolic_expr_symbol_address(EALo+InstrOffset,1,SymbolName,Dest):-
     riscv_symbolic_absolute_split_load(_,EALo,IndexLo,Dest),
     (
         instruction_immediate_offset(EALo,IndexLo,InstrOffset,Size);
@@ -975,7 +984,8 @@ symbolic_expr(EALo+InstrOffset,Size,SymbolName,0):-
     ),
     best_symexpr_symbol(Dest,SymbolName,SymbolLoc).
 
-symbolic_expr_symbol_minus_symbol(EA+InstrOffset,Size,"__global_pointer$",SymbolName,1,0):-
+symbolic_expr_symbol_minus_symbol(EA+InstrOffset,Size,"__global_pointer$",SymbolName,1,0),
+symbolic_expr_symbol_address(EA+InstrOffset,2,SymbolName,Dest):-
     riscv_gp_reference(EA,Index,Dest),
     (
         instruction_immediate_offset(EA,Index,InstrOffset,Size);
@@ -1164,7 +1174,8 @@ block_needs_splitting_at(Dest):-
 labeled_ea(Dest):-
     riscv_absolute_jump_table_entry(_,_,Dest).
 
-symbolic_expr(EntryEA,4,SymbolName,0):-
+symbolic_expr(EntryEA,4,SymbolName,0),
+symbolic_expr_symbol_address(EntryEA,1,SymbolName,Dest):-
     riscv_absolute_jump_table_entry(_,EntryEA,Dest),
     best_symexpr_symbol(Dest,SymbolName,"Beg").
 

@@ -290,7 +290,8 @@ labeled_ea(SectionEnd),
 boundary_sym_expr(EA,SectionEnd,"symbol beyond owning section"):-
     arm64_split_load_symbol_after_section(EA,_,_,SectionEnd).
 
-symbolic_expr(EA+InstrOffset,Size,SymbolName,Offset):-
+symbolic_expr(EA+InstrOffset,Size,SymbolName,Offset),
+symbolic_expr_symbol_address(EA+InstrOffset,1,SymbolName,SectionEnd):-
     arm64_split_load_symbol_after_section(EA,Index,Dest,SectionEnd),
     (
         instruction_immediate_offset(EA,Index,InstrOffset,Size);

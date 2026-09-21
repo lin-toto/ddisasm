@@ -139,6 +139,17 @@ The symbols in this predicate are referred by name.
 .output symbolic_expr_symbol_minus_symbol
 
 /**
+Retain the address of a symbol selected by inference. Names alone do not
+identify local definitions: distinct functions can have the same name, even
+when that name was inferred (e.g. multiple CRT finalizers). Index is 1 for a
+Symbol+Offset expression, and 1/2 in the order used by
+symbolic_expr_symbol_minus_symbol. Absent entries retain name-based lookup
+for expressions whose source only specifies a name, such as external imports.
+*/
+.decl symbolic_expr_symbol_address(EA:address,Index:unsigned,Symbol:symbol,SymbolEA:address)
+.output symbolic_expr_symbol_address
+
+/**
 The symbolic operand at address 'EA' and 'Index' has a symbolic expression
 attribute 'Attribute'. Note that some attributes may be inferred but not used,
 if the corresponding `symbolic_operand` is not selected.
@@ -2345,7 +2356,8 @@ symbolic_expr(EA,Size,Symbol,Offset):-
     // Empty symbols must have a symbol name inferred.
     Symbol != "".
 
-symbolic_expr(EA,Size,Symbol,Offset):-
+symbolic_expr(EA,Size,Symbol,Offset),
+symbolic_expr_symbol_address(EA,1,Symbol,TargetEA):-
     symbolic_expr_from_relocation(EA,Size,"",Offset,TargetEA),
     best_symexpr_symbol(TargetEA,Symbol,_).
 
@@ -2353,7 +2365,9 @@ symbolic_expr_symbol_minus_symbol(EA,Size,SymbolName1,SymbolName2,Scale,Offset):
     symbol_minus_symbol_from_relocation(EA,Size,SymbolName1,SymbolName2,Scale,Offset).
 
 // Symbol-Symbol
-symbolic_expr_symbol_minus_symbol(EA,Size,SymbolName1,SymbolName2,Scale,FinalOffset):-
+symbolic_expr_symbol_minus_symbol(EA,Size,SymbolName1,SymbolName2,Scale,FinalOffset),
+symbolic_expr_symbol_address(EA,1,SymbolName1,NewSymbol1),
+symbolic_expr_symbol_address(EA,2,SymbolName2,NewSymbol2):-
     symbol_minus_symbol(EA,Size,Symbol1,Symbol2,Scale,Offset),
     !symbolic_expr_from_relocation(EA,_,_,_,_),
     !symbol_minus_symbol_from_relocation(EA,_,_,_,_,_),
@@ -2386,7 +2400,8 @@ symbolic_expr_symbol_minus_symbol(EA,Size,SymbolName1,SymbolName2,Scale,FinalOff
     best_symexpr_symbol(NewSymbol2,SymbolName2,Symbol2Loc).
 
 // Symbolic operands
-symbolic_expr(EA+InstrOffset,Size,SymbolName,Offset):-
+symbolic_expr(EA+InstrOffset,Size,SymbolName,Offset),
+symbolic_expr_symbol_address(EA+InstrOffset,1,SymbolName,FinalDest):-
     code(EA),
     moved_label(EA,Index,Dest,FinalDest),
     !custom_symbolic_expr_operand(EA,Index),
@@ -2400,7 +2415,8 @@ symbolic_expr(EA+InstrOffset,Size,SymbolName,Offset):-
     Offset = as(Dest,number) - as(FinalDest,number),
     best_symexpr_symbol(FinalDest,SymbolName,"Beg").
 
-symbolic_expr(EA+InstrOffset,Size,SymbolName,0):-
+symbolic_expr(EA+InstrOffset,Size,SymbolName,0),
+symbolic_expr_symbol_address(EA+InstrOffset,1,SymbolName,Dest):-
     code(EA),
     symbolic_operand(EA,Index,Dest,_),
     !custom_symbolic_expr_operand(EA,Index),
@@ -2421,7 +2437,8 @@ symbolic_expr(EA+InstrOffset,Size,SymbolName,0):-
 
 
 // Symbolic data
-symbolic_expr(EA,Size,SymbolName,Offset):-
+symbolic_expr(EA,Size,SymbolName,Offset),
+symbolic_expr_symbol_address(EA,1,SymbolName,FinalDest):-
     moved_data_label(EA,Size,Dest,FinalDest),
     !symbolic_expr_from_relocation(EA,_,_,_,_),
     !symbol_minus_symbol_from_relocation(EA,_,_,_,_,_),
@@ -2429,7 +2446,8 @@ symbolic_expr(EA,Size,SymbolName,Offset):-
     Offset = as(Dest,number) - as(FinalDest,number),
     best_symexpr_symbol(FinalDest,SymbolName,"Beg").
 
-symbolic_expr(EA,Size,SymbolName,0):-
+symbolic_expr(EA,Size,SymbolName,0),
+symbolic_expr_symbol_address(EA,1,SymbolName,Dest):-
     symbolic_data(EA,Size,Dest),
     !symbolic_expr_from_relocation(EA,_,_,_,_),
     !symbol_minus_symbol_from_relocation(EA,_,_,_,_,_),

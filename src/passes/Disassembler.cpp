@@ -188,6 +188,20 @@ struct SymExprSymbolMinusSymbol
     int64_t Offset;
 };
 
+struct SymbolicExprSymbolAddress
+{
+    explicit SymbolicExprSymbolAddress(souffle::tuple &Tuple)
+    {
+        assert(Tuple.size() == 4);
+        Tuple >> EA >> Index >> Symbol >> Target;
+    }
+
+    gtirb::Addr EA{0};
+    uint64_t Index{0};
+    std::string Symbol;
+    gtirb::Addr Target{0};
+};
+
 struct SymbolicExprAttribute
 {
     explicit SymbolicExprAttribute(gtirb::Addr A) : EA(A)
@@ -255,6 +269,7 @@ struct SymbolicInfo
     VectorByEA<SymbolicExpr> SymbolicExprs;
     VectorByEA<SymExprSymbolMinusSymbol> SymbolMinusSymbolSymbolicExprs;
     VectorByEA<SymbolicExprAttribute> SymbolicExprAttributes;
+    VectorByEA<SymbolicExprSymbolAddress> SymbolAddresses;
 };
 
 template <typename Container, typename Elem = typename Container::value_type>
@@ -356,6 +371,10 @@ void removeSymbolVersionsFromNames(gtirb::Module &Module)
     }
 }
 
+// Names are not identities for local symbols. In particular, inference can
+// recover the same CRT function name at more than one address.
+gtirb::Symbol *findSymbol(gtirb::Module &Module, gtirb::Addr EA, std::string Name);
+
 void buildInferredSymbols(gtirb::Context &Context, gtirb::Module &Module,
                           souffle::SouffleProgram &Program)
 {
@@ -367,7 +386,7 @@ void buildInferredSymbols(gtirb::Context &Context, gtirb::Module &Module,
         std::string Name;
         std::string Scope, Visibility, Type;
         T >> Addr >> Name >> Scope >> Visibility >> Type;
-        if(!Module.findSymbols(Name))
+        if(!findSymbol(Module, Addr, Name))
         {
             gtirb::Symbol *Symbol = Module.addSymbol(Context, Addr, Name);
             if(SymbolInfo)
@@ -457,6 +476,37 @@ gtirb::Symbol *findFirstSymbol(gtirb::Module &Module, std::string Name, bool fin
         std::cerr << "WARNING: Could not find GLOBAL/WEAK symbol for " << Name << std::endl;
     }
     return &*Found.begin();
+}
+
+// Preserve a selected target address rather than choosing an arbitrary local
+// definition with the same name. Name-only expressions (e.g. imports) retain
+// their previous resolution. A missing or contradictory address is an error,
+// never permission to silently fall back to a different definition.
+gtirb::Symbol *findExpressionSymbol(
+    gtirb::Module &Module, const VectorByEA<SymbolicExprSymbolAddress> &Addresses,
+    gtirb::Addr EA, uint64_t Index, const std::string &Name)
+{
+    std::optional<gtirb::Addr> Target;
+    const auto [Begin, End] = Addresses.equal_range(EA);
+    for(auto It = Begin; It != End; ++It)
+    {
+        if(It->Index != Index || It->Symbol != Name)
+            continue;
+        if(Target && *Target != It->Target)
+        {
+            std::cerr << "Conflicting target addresses for symbol " << Name
+                      << " in expression at " << EA << std::endl;
+            exit(1);
+        }
+        Target = It->Target;
+    }
+    if(!Target)
+        return findFirstSymbol(Module, Name);
+    if(auto *Symbol = findSymbol(Module, *Target, Name))
+        return Symbol;
+    std::cerr << "Missing symbol " << Name << " at " << *Target
+              << " in expression at " << EA << std::endl;
+    exit(1);
 }
 
 // Build a first version of the SymbolForwarding table with copy relocations and
@@ -659,7 +709,8 @@ void buildSymbolicExpr(gtirb::Module &Module, const gtirb::Addr &Ea,
     if(const auto SymExpr = SymbolicInfo.SymbolicExprs.find(Ea);
        SymExpr != SymbolicInfo.SymbolicExprs.end())
     {
-        gtirb::Symbol *FoundSymbol = findFirstSymbol(Module, SymExpr->Symbol);
+        gtirb::Symbol *FoundSymbol =
+            findExpressionSymbol(Module, SymbolicInfo.SymbolAddresses, Ea, 1, SymExpr->Symbol);
         // FIXME: We need to handle overlapping sections here.
         addSymbolicExpressionToCodeBlock<gtirb::SymAddrConst>(Module, Ea, SymExpr->Size,
                                                               SymExpr->Addend, FoundSymbol, Attrs);
@@ -668,8 +719,10 @@ void buildSymbolicExpr(gtirb::Module &Module, const gtirb::Addr &Ea,
     else if(const auto SymExpr = SymbolicInfo.SymbolMinusSymbolSymbolicExprs.find(Ea);
             SymExpr != SymbolicInfo.SymbolMinusSymbolSymbolicExprs.end())
     {
-        gtirb::Symbol *FoundSymbol1 = findFirstSymbol(Module, SymExpr->Symbol1);
-        gtirb::Symbol *FoundSymbol2 = findFirstSymbol(Module, SymExpr->Symbol2);
+        gtirb::Symbol *FoundSymbol1 =
+            findExpressionSymbol(Module, SymbolicInfo.SymbolAddresses, Ea, 1, SymExpr->Symbol1);
+        gtirb::Symbol *FoundSymbol2 =
+            findExpressionSymbol(Module, SymbolicInfo.SymbolAddresses, Ea, 2, SymExpr->Symbol2);
         addSymbolicExpressionToCodeBlock<gtirb::SymAddrAddr>(
             Module, Ea, SymExpr->Size, static_cast<int64_t>(SymExpr->Scale), SymExpr->Offset,
             FoundSymbol2, FoundSymbol1, Attrs);
@@ -707,7 +760,9 @@ void buildCodeSymbolicInformation(gtirb::Module &Module, souffle::SouffleProgram
         convertSortedRelation<VectorByEA<SymExprSymbolMinusSymbol>>(
             "symbolic_expr_symbol_minus_symbol", Program),
         convertSortedRelation<VectorByEA<SymbolicExprAttribute>>("symbolic_expr_attribute",
-                                                                 Program)};
+                                                                 Program),
+        convertSortedRelation<VectorByEA<SymbolicExprSymbolAddress>>(
+            "symbolic_expr_symbol_address", Program)};
     std::map<gtirb::Addr, DecodedInstruction> decodedInstructions =
         recoverInstructions(Program, Code);
 
@@ -890,6 +945,8 @@ void buildDataBlocks(gtirb::Context &Context, gtirb::Module &Module,
         convertSortedRelation<std::set<gtirb::Addr>>("data_object_boundary", Program);
     auto SymbolicExprAttributes = convertSortedRelation<VectorByEA<SymbolicExprAttribute>>(
         "symbolic_expr_attribute", Program);
+    auto SymbolAddresses = convertSortedRelation<VectorByEA<SymbolicExprSymbolAddress>>(
+        "symbolic_expr_symbol_address", Program);
 
     std::map<gtirb::UUID, std::string> TypesTable;
 
@@ -919,7 +976,8 @@ void buildDataBlocks(gtirb::Context &Context, gtirb::Module &Module,
                        SymExpr != SymbolicExprs.end())
                     {
                         DataBlock = gtirb::DataBlock::Create(Context, SymExpr->Size);
-                        gtirb::Symbol *foundSymbol = findFirstSymbol(Module, SymExpr->Symbol);
+                        gtirb::Symbol *foundSymbol = findExpressionSymbol(
+                            Module, SymbolAddresses, CurrentAddr, 1, SymExpr->Symbol);
                         gtirb::SymAttributeSet Attributes =
                             buildSymbolicExpressionAttributes(CurrentAddr, SymbolicExprAttributes);
 
@@ -931,8 +989,10 @@ void buildDataBlocks(gtirb::Context &Context, gtirb::Module &Module,
                             SymExprSymMinusSym != SymbolMinusSymbol.end())
                     {
                         DataBlock = gtirb::DataBlock::Create(Context, SymExprSymMinusSym->Size);
-                        gtirb::Symbol *Sym1 = findFirstSymbol(Module, SymExprSymMinusSym->Symbol1);
-                        gtirb::Symbol *Sym2 = findFirstSymbol(Module, SymExprSymMinusSym->Symbol2);
+                        gtirb::Symbol *Sym1 = findExpressionSymbol(
+                            Module, SymbolAddresses, CurrentAddr, 1, SymExprSymMinusSym->Symbol1);
+                        gtirb::Symbol *Sym2 = findExpressionSymbol(
+                            Module, SymbolAddresses, CurrentAddr, 2, SymExprSymMinusSym->Symbol2);
                         gtirb::SymAttributeSet Attributes =
                             buildSymbolicExpressionAttributes(CurrentAddr, SymbolicExprAttributes);
 
@@ -1186,7 +1246,13 @@ void buildFunctions(gtirb::Module &Module, souffle::SouffleProgram &Program)
             FunctionEntry2Function[FunctionEntry] = FunctionUUID;
             FunctionEntries[FunctionUUID].insert(EntryBlockUUID);
 
-            gtirb::Symbol *FunctionNameSymbol = findFirstSymbol(Module, FunctionName);
+            gtirb::Symbol *FunctionNameSymbol = findSymbol(Module, FunctionEntry, FunctionName);
+            if(!FunctionNameSymbol)
+            {
+                std::cerr << "Missing function symbol " << FunctionName << " at "
+                          << FunctionEntry << std::endl;
+                exit(1);
+            }
 
             FunctionNames.insert({FunctionUUID, FunctionNameSymbol->getUUID()});
         }
