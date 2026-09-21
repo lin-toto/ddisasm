@@ -282,6 +282,14 @@ symbolic_operand_candidate(EA,Index,Dest,"data"):-
 custom_symbolic_expr_operand(EA,Index):-
     arm64_split_load_symbol_after_section(EA,Index,_,_).
 
+// The custom expression below needs an end-position symbol, not a symbol at
+// the beginning of an adjacent section. Request that anchor explicitly even
+// when no original symbol names the owner's end. Otherwise the custom rule
+// suppresses ordinary symbolization but cannot emit its own expression.
+labeled_ea(SectionEnd),
+boundary_sym_expr(EA,SectionEnd,"symbol beyond owning section"):-
+    arm64_split_load_symbol_after_section(EA,_,_,SectionEnd).
+
 symbolic_expr(EA+InstrOffset,Size,SymbolName,Offset):-
     arm64_split_load_symbol_after_section(EA,Index,Dest,SectionEnd),
     (
