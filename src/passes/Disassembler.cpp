@@ -24,6 +24,7 @@
 #include "Disassembler.h"
 
 #include <boost/uuid/uuid_generators.hpp>
+#include <iterator>
 #include <regex>
 
 #include "../AuxDataSchema.h"
@@ -418,7 +419,9 @@ gtirb::Symbol *findSymbol(gtirb::Module &module, gtirb::Addr Ea, std::string Nam
 }
 
 // Auxiliary function to get the first symbol with a given name.
-// The function will exit with an error if no such symbol exists.
+// The function will exit with an error if no such symbol exists. GOT forwarding
+// prefers global/weak definitions, but a unique, explicitly local symbol is
+// also unambiguous (for example the linker-defined _DYNAMIC).
 gtirb::Symbol *findFirstSymbol(gtirb::Module &Module, std::string Name, bool findGlobal = false)
 {
     auto Found = Module.findSymbols(Name);
@@ -443,6 +446,12 @@ gtirb::Symbol *findFirstSymbol(gtirb::Module &Module, std::string Name, bool fin
                         return &Symbol;
                     }
                 }
+            }
+            if(std::next(Found.begin()) == Found.end())
+            {
+                auto Info = SymbolInfo->find(Found.begin()->getUUID());
+                if(Info != SymbolInfo->end() && std::get<2>(Info->second) == "LOCAL")
+                    return &*Found.begin();
             }
         }
         std::cerr << "WARNING: Could not find GLOBAL/WEAK symbol for " << Name << std::endl;

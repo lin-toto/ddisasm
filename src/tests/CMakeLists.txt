@@ -22,6 +22,7 @@ add_executable(
   InstructionRelations.Test.cpp
   DatalogIO.Test.cpp
   LiveRegisters.Test.cpp
+  SymbolLookup.Test.cpp
   Functors.Test.cpp)
 
 target_link_libraries(
