@@ -335,6 +335,10 @@ symbolic_operand_point(EA,Imm_index,-2,
 //
 symbolic_operand_point(EA,Imm_index,-1,"immediate may be bitmask"):-
     symbolic_operand_candidate(EA,Imm_index,_,_),
+    // A recovered address fragment is not a standalone scalar immediate.
+    // In particular, a zero LO12 tail must relocate if its page-aligned
+    // target later moves within a page.
+    !split_load_operand(EA,Imm_index,_),
     instruction_get_op(EA,Imm_index,Op),
     op_immediate(Op,Imm,_),
     !direct_call(EA,_),
