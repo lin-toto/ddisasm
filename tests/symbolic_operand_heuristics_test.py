@@ -265,7 +265,8 @@ class SymbolicOperandsTests(unittest.TestCase):
             module = disassemble(binary).ir().modules[0]
 
         main = next(module.symbols_named("main")).referent
-        page_struct = next(module.symbols_named("page_struct")).referent
+        page_struct_symbol = next(module.symbols_named("page_struct"))
+        page_struct = page_struct_symbol.referent
         page_message = next(module.symbols_named("page_message"))
         self.assertIsInstance(main, gtirb.CodeBlock)
         self.assertIsInstance(page_struct, gtirb.DataBlock)
@@ -299,13 +300,20 @@ class SymbolicOperandsTests(unittest.TestCase):
             else page_message.value
         )
 
-        # The ADR itself names the exact page-aligned base.  Only the ADD
-        # names the field sixty-four bytes into the object.
+        # ADR names an exact address even when the original base is page
+        # aligned. Its ADD must encode target - base, not :lo12:target;
+        # relayout can move the base off a page boundary or expand the object.
         self.assertEqual(resolved_address(expression_at(16)), page_struct.address)
-        self.assertEqual(
-            resolved_address(expression_at(20)),
-            page_message_address,
+        field_offset = expression_at(20)
+        self.assertIsInstance(field_offset, gtirb.SymAddrAddr)
+        self.assertEqual(field_offset.symbol1, page_message)
+        self.assertEqual(field_offset.symbol2, page_struct_symbol)
+        self.assertEqual(field_offset.scale, 1)
+        self.assertEqual(field_offset.offset, 0)
+        self.assertNotIn(
+            gtirb.SymbolicExpression.Attribute.LO12, field_offset.attributes
         )
+        self.assertEqual(page_message_address - page_struct.address, 64)
 
     @unittest.skipUnless(
         platform.system() == "Linux"

@@ -731,7 +731,7 @@ alignment_from_address(EA, AlignInBits):-
 Auxiliary predicate that builds initial alignments from `alignment_required`:
 the max alignment is picked for an EA later.
 */
-.decl alignment_candidate(EA:address,AlignInBits:unsigned)
+.decl alignment_candidate(EA:address,AlignInBits:unsigned,Reason:symbol)
 
 /**
 Recover an alignment anchor that precedes an ELF OBJECT in an executable
@@ -842,12 +842,15 @@ x64_low_bit_selected_table_alignment(TableEA,AlignInBits):-
 
 // Data in code needs to be aligned when referenced by instruction that
 // requires aligned memory: e.g., some SIMD instructions
-alignment_candidate(DataEA, AlignInBits):-
+alignment_candidate(DataEA, AlignInBits, Reason):-
     arch.alignment_required(EA,AlignInBits),
     code(EA),
     (
-        pc_relative_operand(EA,_,DataEA);
-        composite_data_access(_,EA,DataEA,AlignInBits)
+        pc_relative_operand(EA,_,DataEA),
+        Reason="pc_relative_operand"
+        ;
+        composite_data_access(_,EA,DataEA,AlignInBits),
+        Reason="composite_data_access"
     ),
     data_segment(Begin,End),
     DataEA >= Begin,
@@ -860,14 +863,14 @@ alignment_candidate(DataEA, AlignInBits):-
 // the fixed displacement.  When the original base has the same alignment as
 // the target, preserve that alignment at the base as well so their relative
 // offset remains stable.
-alignment_candidate(BaseEA, AlignInBits):-
+alignment_candidate(BaseEA, AlignInBits, "composite_base"):-
     // Use every alignment already justified for the effective target, rather
     // than only the minimum required by this particular load.  Another access
     // may impose a stronger alignment on the same target (for example, a
     // vector-width direct load alongside a narrower base+displacement load).
     // Positive recursion also propagates that constraint through longer
     // materialized-base chains.
-    alignment_candidate(DataEA,AlignInBits),
+    alignment_candidate(DataEA,AlignInBits,_),
     composite_data_access(BaseInsnEA,LoadEA,DataEA,_),
     arch.alignment_required(LoadEA,_),
     arch.pc_relative_addr(BaseInsnEA,_,BaseEA),
@@ -885,8 +888,8 @@ alignment_candidate(BaseEA, AlignInBits):-
 // same alignment at the original PC-relative base when both addresses had the
 // same residue.  EADef ties the recovered constant to that exact PC-relative
 // materialization rather than to an unrelated constant-valued register.
-alignment_candidate(BaseEA, AlignInBits):-
-    alignment_candidate(DataEA,AlignInBits),
+alignment_candidate(BaseEA, AlignInBits, "constant_base"):-
+    alignment_candidate(DataEA,AlignInBits,_),
     arch.pc_relative_addr(BaseInsnEA,_,BaseEA),
     const_value_reg_used(LoadEA,BaseInsnEA,_,BaseReg,RegValue),
     arch.reg_relative_load(LoadEA,BaseReg,Offset,_),
@@ -903,7 +906,7 @@ alignment_candidate(BaseEA, AlignInBits):-
 // original 32-byte alignment of a nonempty ELF OBJECT in a code section.  The
 // symbol type and section restriction avoid treating ordinary coincidentally
 // aligned code labels as data-alignment evidence.
-alignment_candidate(EA,32):-
+alignment_candidate(EA,32,"code_object"):-
     defined_symbol(EA,Size,"OBJECT",_,_,_,_,_,_),
     Size >= 32,
     EA % 32 = 0,
@@ -914,21 +917,22 @@ alignment_candidate(EA,32):-
 
 // Preserve the anchor, not the following object: the object's nonzero residue
 // within the aligned region can be part of program semantics.
-alignment_candidate(Anchor,AlignInBits):-
+alignment_candidate(Anchor,AlignInBits,"zero_prefixed_code_object"):-
     zero_prefixed_code_object_alignment(
         Anchor,_,_,AlignInBits
     ).
 
-alignment_candidate(TableEA,AlignInBits):-
+alignment_candidate(TableEA,AlignInBits,"low_bit_selected_table"):-
     x64_low_bit_selected_table_alignment(TableEA,AlignInBits).
 
 // In addition to global/weak functions,
 // some local functions may need alignments: e.g., member function pointers
 // (https://itanium-cxx-abi.github.io/cxx-abi/abi.html#member-function-pointers)
 // As the simplest solution, add alignment to each function
-alignment_candidate(FuncEA,AlignInBits):-
+alignment_candidate(FuncEA,AlignInBits,Reason):-
     function_inference.function_entry(FuncEA),
-    alignment_from_address(FuncEA,AlignInBits).
+    alignment_from_address(FuncEA,AlignInBits),
+    Reason="function_entry".
 
 /**
 Information about alignment in bits for a given address
@@ -937,8 +941,8 @@ Information about alignment in bits for a given address
 .output alignment
 
 alignment(DataEA, AlignInBits):-
-    alignment_candidate(DataEA, AlignInBits),
-    AlignInBits = max X: {alignment_candidate(DataEA, X)}.
+    alignment_candidate(DataEA, AlignInBits, _),
+    AlignInBits = max X: {alignment_candidate(DataEA, X, _)}.
 
 //////////////////////////////////////////////////////////////////////////////////
 // Operations to abstract features of instructions

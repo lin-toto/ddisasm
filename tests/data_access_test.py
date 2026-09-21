@@ -1127,6 +1127,7 @@ class DataAccessTests(unittest.TestCase):
             adr r0, .data0
             .load:
             ldr r0, [r0, #.data1-.data0]
+            b .end
             .data0:
                 .long 0
             .data1:
@@ -1159,6 +1160,7 @@ class DataAccessTests(unittest.TestCase):
             adr r0, .data0
             .load:
             ldm r0, {r0, r1, r2}
+            b .end
             .data0:
                 .long 0
                 .long 1
