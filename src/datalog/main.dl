@@ -140,6 +140,9 @@ Convert between input_reg and register with arch.reg_map
 // Inference of function boundaries.
 #include "basic_function_inference.dl"
 
+// Live-register analysis.
+#include "live_register_analysis.dl"
+
 // Predicates for debugging and statistics.
 #include "debug_stats.dl"
 #include "self_diagnose.dl"

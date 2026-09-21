@@ -1117,52 +1117,52 @@ interior_object_pointer(EA,SrcBeg,SrcBeg+SrcSize,DestBeg,DestBeg+DestSize):-
     Dest < DestBeg+DestSize,
     !defined_symbol(Dest,_,_,_,_,_,_,_,_).
 
-.decl interior_object_pointer_boundary_between(
-          EA:address,Next:address,SrcBeg:address,SrcEnd:address,
-          DestBeg:address,DestEnd:address)
+// Assign each pointer candidate to the range starting at its nearest original
+// symbol or nonempty OBJECT end. Equal ranges mean no boundary lies in (A,B],
+// without materializing every pair of candidates crossed by a boundary.
+.decl pointer_source_boundary(Boundary:address)
 
-interior_object_pointer_boundary_between(
-          EA,Next,SrcBeg,SrcEnd,DestBeg,DestEnd):-
-    interior_object_pointer(EA,SrcBeg,SrcEnd,DestBeg,DestEnd),
-    interior_object_pointer(Next,SrcBeg,SrcEnd,DestBeg,DestEnd),
-    Next > EA,
-    defined_symbol(Boundary,_,_,_,_,_,_,_,_),
-    Boundary > EA,
-    Boundary <= Next.
+// Addresses are unsigned, so zero bounds the range before the first symbol.
+pointer_source_boundary(0).
 
-interior_object_pointer_boundary_between(
-          EA,Next,SrcBeg,SrcEnd,DestBeg,DestEnd):-
-    interior_object_pointer(EA,SrcBeg,SrcEnd,DestBeg,DestEnd),
-    interior_object_pointer(Next,SrcBeg,SrcEnd,DestBeg,DestEnd),
-    Next > EA,
+pointer_source_boundary(Boundary):-
+    defined_symbol(Boundary,_,_,_,_,_,_,_,_).
+
+pointer_source_boundary(Beg+Size):-
     defined_symbol(Beg,Size,"OBJECT",_,_,_,_,_,_),
-    Size > 0,
-    Beg+Size > EA,
-    Beg+Size <= Next.
+    Size > 0.
 
-.decl interior_object_pointer_between(EA:address,Next:address,
-                                      SrcBeg:address,SrcEnd:address,
-                                      DestBeg:address,DestEnd:address)
+.decl pointer_candidate_source_range(EA:address,Begin:address)
 
-interior_object_pointer_between(EA,Next,SrcBeg,SrcEnd,DestBeg,DestEnd):-
+pointer_candidate_source_range(EA,Begin):-
+    arch.pointer_size(Pt_size),
+    data_object_candidate(EA,Pt_size,"symbol"),
+    Begin = max Boundary : {
+        pointer_source_boundary(Boundary),
+        Boundary <= EA
+    }.
+
+// Compute the successor before joining source ranges, so the minimum is not
+// evaluated again for every candidate sharing a range.
+.decl interior_object_pointer_successor(EA:address,Next:address,
+                                        SrcBeg:address,SrcEnd:address,
+                                        DestBeg:address,DestEnd:address)
+
+interior_object_pointer_successor(EA,Next,SrcBeg,SrcEnd,DestBeg,DestEnd):-
     interior_object_pointer(EA,SrcBeg,SrcEnd,DestBeg,DestEnd),
-    interior_object_pointer(Next,SrcBeg,SrcEnd,DestBeg,DestEnd),
-    Next > EA,
-    interior_object_pointer(Mid,SrcBeg,SrcEnd,DestBeg,DestEnd),
-    Mid > EA,
-    Mid < Next.
+    Next = min Candidate : {
+        interior_object_pointer(Candidate,SrcBeg,SrcEnd,DestBeg,DestEnd),
+        Candidate > EA
+    }.
 
 .decl next_interior_object_pointer(EA:address,Next:address,
                                    SrcBeg:address,SrcEnd:address,
                                    DestBeg:address,DestEnd:address)
 
 next_interior_object_pointer(EA,Next,SrcBeg,SrcEnd,DestBeg,DestEnd):-
-    interior_object_pointer(EA,SrcBeg,SrcEnd,DestBeg,DestEnd),
-    interior_object_pointer(Next,SrcBeg,SrcEnd,DestBeg,DestEnd),
-    Next > EA,
-    !interior_object_pointer_between(EA,Next,SrcBeg,SrcEnd,DestBeg,DestEnd),
-    !interior_object_pointer_boundary_between(
-        EA,Next,SrcBeg,SrcEnd,DestBeg,DestEnd).
+    interior_object_pointer_successor(EA,Next,SrcBeg,SrcEnd,DestBeg,DestEnd),
+    pointer_candidate_source_range(EA,Range),
+    pointer_candidate_source_range(Next,Range).
 
 .decl interior_object_pointer_seed(EA:address,Stride:unsigned,
                                    SrcBeg:address,SrcEnd:address,
@@ -1239,8 +1239,8 @@ length_delimited_interior_pointer(EA):-
     ),
     NextDest = Dest+Length,
     NextDest > Dest,
-    !interior_object_pointer_boundary_between(
-        EA,Next,SrcBeg,SrcEnd,DestBeg,DestEnd).
+    pointer_candidate_source_range(EA,Range),
+    pointer_candidate_source_range(Next,Range).
 
 data_object_point(EA,Pt_size,"symbol",2,
                   "length-delimited interior-object pointer"):-
@@ -1272,23 +1272,6 @@ sized_object_pointer(EA,Dest,DestBeg,DestBeg+DestSize):-
     Dest < DestBeg+DestSize,
     Length <= DestBeg+DestSize-Dest.
 
-.decl sized_pointer_source_boundary_between(Beg:address,End:address)
-
-sized_pointer_source_boundary_between(Beg,End):-
-    sized_object_pointer(Beg,_,_,_),
-    sized_object_pointer(End,_,_,_),
-    defined_symbol(Boundary,_,_,_,_,_,_,_,_),
-    Boundary > Beg,
-    Boundary <= End.
-
-sized_pointer_source_boundary_between(Beg,End):-
-    sized_object_pointer(Beg,_,_,_),
-    sized_object_pointer(End,_,_,_),
-    defined_symbol(ObjectBeg,ObjectSize,"OBJECT",_,_,_,_,_,_),
-    ObjectSize > 0,
-    ObjectBeg+ObjectSize > Beg,
-    ObjectBeg+ObjectSize <= End.
-
 .decl strided_sized_object_pointer_seed(
           EA:address,Stride:unsigned,DestStride:unsigned,
           SrcBeg:address,SrcEnd:address,DestBeg:address,DestEnd:address)
@@ -1310,7 +1293,8 @@ strided_sized_object_pointer_seed(
     loaded_section(SrcBeg,SrcEnd,SrcName),
     EA >= SrcBeg,
     EA+3*Stride+2*Pt_size <= SrcEnd,
-    !sized_pointer_source_boundary_between(EA,EA+3*Stride).
+    pointer_candidate_source_range(EA,Range),
+    pointer_candidate_source_range(EA+3*Stride,Range).
 
 .decl strided_sized_object_pointer_member(EA:address)
 
@@ -1352,8 +1336,8 @@ parallel_strided_sized_object_pointer_seed(ParallelEA,Stride):-
     sized_object_pointer(
         ParallelEA+3*Stride,ParallelDest+3*DestStride,DestBeg,DestEnd),
     ParallelEA+3*Stride+2*Pt_size <= SrcEnd,
-    !sized_pointer_source_boundary_between(
-        EA,ParallelEA+3*Stride).
+    pointer_candidate_source_range(EA,Range),
+    pointer_candidate_source_range(ParallelEA+3*Stride,Range).
 
 .decl parallel_strided_sized_object_pointer_member(EA:address)
 
@@ -1939,26 +1923,6 @@ short_string_source_reference(EA):-
 // records repeat the same exact inferred-string target at one pointer-aligned
 // stride.  Four records are deliberately insufficient, and original symbol
 // or nested-OBJECT boundaries split the pattern.
-.decl repeated_string_pointer_source_boundary_between(
-          Beg:address,End:address)
-
-repeated_string_pointer_source_boundary_between(Beg,End):-
-    arch.pointer_size(Pt_size),
-    data_object_candidate(Beg,Pt_size,"symbol"),
-    data_object_candidate(End,Pt_size,"symbol"),
-    defined_symbol(Boundary,_,_,_,_,_,_,_,_),
-    Boundary > Beg,
-    Boundary <= End.
-
-repeated_string_pointer_source_boundary_between(Beg,End):-
-    arch.pointer_size(Pt_size),
-    data_object_candidate(Beg,Pt_size,"symbol"),
-    data_object_candidate(End,Pt_size,"symbol"),
-    defined_symbol(ObjectBeg,ObjectSize,"OBJECT",_,_,_,_,_,_),
-    ObjectSize > 0,
-    ObjectBeg+ObjectSize > Beg,
-    ObjectBeg+ObjectSize <= End.
-
 .decl leading_repeated_string_pointer_record(EA:address)
 
 leading_repeated_string_pointer_record(EA):-
@@ -1989,8 +1953,8 @@ leading_repeated_string_pointer_record(EA):-
     data_object_candidate(EA1+3*Stride,Pt_size,"symbol"),
     address_in_data_refined(EA1+3*Stride,Dest),
     EA+4*Stride+Pt_size <= EA+SrcSize,
-    !repeated_string_pointer_source_boundary_between(
-        EA,EA+4*Stride).
+    pointer_candidate_source_range(EA,Range),
+    pointer_candidate_source_range(EA+4*Stride,Range).
 
 data_object_point(EA,Pt_size,"symbol",2,
                   "leading field in repeated string-pointer records"):-

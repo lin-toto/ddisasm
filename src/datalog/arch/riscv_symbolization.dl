@@ -230,11 +230,63 @@ riscv_lui(EA,Reg,as(SignedUpper bshl 12,address)):-
 
 .decl riscv_split_load(EAHi:address,EALo:address,IndexLo:operand_index,Dest:address)
 
+.decl riscv_auipc_split_use(EAHi:address,Reg:register,EALo:address)
+.decl riscv_auipc_ambiguous_use(EAHi:address,Reg:register,EALo:address)
+.decl riscv_ambiguous_split_hi(EAHi:address)
+
+riscv_auipc_ambiguous_use(EAHi,Reg,EALo):-
+    riscv_auipc(EAHi,Reg,_),
+    reg_def_use.def_used(EAHi,Reg,EALo,_),
+    reg_def_use.def_used(Other,Reg,EALo,_),
+    Other != EAHi.
+
+riscv_auipc_split_use(EAHi,Reg,EALo):-
+    riscv_auipc(EAHi,Reg,_),
+    next(EAHi,EALo).
+
+// Discover scheduled and cross-block consumers through reaching definitions,
+// as in AArch64 split-load symbolization. Ambiguity filtering belongs to final
+// emission, not this relation used by recursive value/jump-table analysis.
+riscv_auipc_split_use(EAHi,Reg,EALo):-
+    riscv_auipc(EAHi,Reg,_),
+    reg_def_use.def_used(EAHi,Reg,EALo,_).
+
+riscv_ambiguous_split_hi(EAHi):-
+    riscv_split_load(EAHi,EALo,_,_),
+    riscv_auipc_ambiguous_use(EAHi,_,EALo).
+
+// One HI relocation cannot describe two distinct completed addresses when
+// every LO names that same HI. Such consumers need a separate normalization.
+riscv_ambiguous_split_hi(EAHi):-
+    riscv_split_load(EAHi,_,_,Dest1),
+    riscv_split_load(EAHi,_,_,Dest2),
+    Dest1 != Dest2.
+
+// Preserve ambiguity as a diagnostic when final symbolization leaves either
+// endpoint numeric. Explicit relocations may already resolve both endpoints.
+.decl riscv_unresolved_pcrel_reference(EAHi:address,EALo:address,Reason:symbol)
+.output riscv_unresolved_pcrel_reference
+
+riscv_unresolved_pcrel_reference(EAHi,EALo,Reason):-
+    riscv_split_load(EAHi,EALo,_,_),
+    riscv_ambiguous_split_hi(EAHi),
+    code(EAHi), code(EALo),
+    (
+        !symbolic_expr(EAHi,_,_,_), !symbol_minus_symbol(EAHi,_,_,_,_,_)
+        ;
+        !symbolic_expr(EALo,_,_,_), !symbol_minus_symbol(EALo,_,_,_,_,_)
+    ),
+    (
+        riscv_auipc_ambiguous_use(EAHi,_,_), Reason = "multiple reaching definitions"
+        ;
+        !riscv_auipc_ambiguous_use(EAHi,_,_), Reason = "multiple completed addresses"
+    ).
+
 .decl riscv_split_load_zero_addi_alias(EAHi:address,EALo:address,Dest:address)
 
 riscv_split_load_zero_addi_alias(EAHi,EALo,Dest):-
     riscv_auipc(EAHi,Reg,Dest),
-    next(EAHi,EALo),
+    riscv_auipc_split_use(EAHi,Reg,EALo),
     instruction(EALo,4,_, "MV", OpSrc, OpDst, 0, 0, _, _),
     op_regdirect_contains_reg(OpSrc,Reg),
     op_regdirect_contains_reg(OpDst,Reg),
@@ -258,7 +310,7 @@ riscv_split_load(EAHi,EALo,1,Dest):-
 
 riscv_split_load(EAHi,EALo,2,Dest):-
     riscv_auipc(EAHi,Reg,Base),
-    next(EAHi,EALo),
+    riscv_auipc_split_use(EAHi,Reg,EALo),
     arch.reg_arithmetic_operation(EALo,_,Reg,1,Offset),
     !arch.memory_access(_,EALo,_,_,_,_,_,_,_),
     Dest = as(as(Base,number)+Offset,address),
@@ -279,7 +331,7 @@ riscv_split_load(EAHi,EALo,2,Dest):-
 
 riscv_split_load(EAHi,EALo,IndexLo,Dest):-
     riscv_auipc(EAHi,Reg,Base),
-    next(EAHi,EALo),
+    riscv_auipc_split_use(EAHi,Reg,EALo),
     arch.memory_access("LOAD",EALo,IndexLo,_,_,Reg,"NONE",_,Offset),
     Dest = as(as(Base,number)+Offset,address),
     (
@@ -299,7 +351,7 @@ riscv_split_load(EAHi,EALo,IndexLo,Dest):-
 
 riscv_split_load(EAHi,EALo,IndexLo,Dest):-
     riscv_auipc(EAHi,Reg,Base),
-    next(EAHi,EALo),
+    riscv_auipc_split_use(EAHi,Reg,EALo),
     arch.memory_access("STORE",EALo,_,IndexLo,_,Reg,"NONE",_,Offset),
     Dest = as(as(Base,number)+Offset,address),
     (
@@ -591,7 +643,10 @@ riscv_skipped_gp_target(Dest):-
 
 riscv_gp_reference(EA,Index,Dest):-
     riscv_global_pointer(GP),
-    arch.memory_access(_,EA,Index,_,_,"GP","NONE",_,Offset),
+    (
+        arch.load(EA,Index,_,_,"GP","NONE",_,Offset);
+        arch.store(EA,_,Index,_,"GP","NONE",_,Offset)
+    ),
     Dest = as(as(GP,number)+Offset,address),
     !riscv_skipped_gp_target(Dest),
     (
@@ -645,7 +700,10 @@ riscv_pcrel_plt_call(EAHi,EALo,Symbol):-
 .decl riscv_pcrel_anchor_symbol(EAHi:address,Symbol:symbol)
 
 riscv_pcrel_anchor_symbol(EAHi,SymbolName):-
-    riscv_pcrel_control_transfer(EAHi,_,_,_),
+    (
+        riscv_pcrel_control_transfer(EAHi,_,_,_);
+        riscv_split_load(EAHi,_,_,_)
+    ),
     SymbolName = cat(".L_pcrel_",@to_string_hex(EAHi)).
 
 inferred_symbol(EAHi,SymbolName,"LOCAL","DEFAULT","NONE","Beg"):-
@@ -803,6 +861,7 @@ symbolic_expr_attribute(EALo,"LO"):-
 
 symbolic_expr(EAHi+InstrOffset,Size,Symbol,Addend):-
     riscv_split_load_got(EAHi,_,_,Symbol,Addend),
+    !riscv_ambiguous_split_hi(EAHi),
     instruction_immediate_offset(EAHi,1,InstrOffset,Size),
     !symbolic_expr_from_relocation(EAHi+InstrOffset,_,_,_,_),
     !symbol_minus_symbol_from_relocation(EAHi+InstrOffset,_,_,_,_,_),
@@ -810,6 +869,7 @@ symbolic_expr(EAHi+InstrOffset,Size,Symbol,Addend):-
 
 symbolic_expr(EAHi+InstrOffset,Size,SymbolName,Offset):-
     riscv_split_load(EAHi,_,_,Dest),
+    !riscv_ambiguous_split_hi(EAHi),
     !riscv_split_load_got(EAHi,_,_,_,_),
     instruction_immediate_offset(EAHi,1,InstrOffset,Size),
     !symbolic_expr_from_relocation(EAHi+InstrOffset,_,_,_,_),
@@ -858,6 +918,7 @@ symbolic_expr(EAHi+InstrOffset,Size,SymbolName,Offset):-
 
 symbolic_expr(EALo+InstrOffset,Size,SymbolName,0):-
     riscv_split_load(EAHi,EALo,IndexLo,_),
+    !riscv_ambiguous_split_hi(EAHi),
     (
         instruction_immediate_offset(EALo,IndexLo,InstrOffset,Size);
         instruction_displacement_offset(EALo,IndexLo,InstrOffset,Size)
@@ -865,14 +926,15 @@ symbolic_expr(EALo+InstrOffset,Size,SymbolName,0):-
     !symbolic_expr_from_relocation(EALo+InstrOffset,_,_,_,_),
     !symbol_minus_symbol_from_relocation(EALo+InstrOffset,_,_,_,_,_),
     !symbol_minus_symbol(EALo+InstrOffset,_,_,_,_,_),
-    best_symexpr_symbol(EAHi,SymbolName,"Beg").
+    riscv_pcrel_anchor_symbol(EAHi,SymbolName).
 
 symbolic_expr(EALo,4,SymbolName,0):-
     riscv_split_load_zero_addi_alias(EAHi,EALo,_),
+    !riscv_ambiguous_split_hi(EAHi),
     !symbolic_expr_from_relocation(EALo,_,_,_,_),
     !symbol_minus_symbol_from_relocation(EALo,_,_,_,_,_),
     !symbol_minus_symbol(EALo,_,_,_,_,_),
-    best_symexpr_symbol(EAHi,SymbolName,"Beg").
+    riscv_pcrel_anchor_symbol(EAHi,SymbolName).
 
 symbolic_expr_attribute(EALo,"PCREL"):-
     riscv_split_load_zero_addi_alias(_,EALo,_).

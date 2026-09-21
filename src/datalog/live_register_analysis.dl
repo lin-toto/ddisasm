@@ -1,0 +1,222 @@
+//===- live_register_analysis.dl ----------------------------*- datalog -*-===//
+//
+//  Copyright (C) 2026 GrammaTech, Inc.
+//
+//  This code is licensed under the GNU Affero General Public License
+//  as published by the Free Software Foundation, either version 3 of
+//  the License, or (at your option) any later version. See the
+//  LICENSE.txt file in the project root for license terms or visit
+//  https://www.gnu.org/licenses/agpl.txt.
+//
+//===----------------------------------------------------------------------===//
+
+.decl live_register_name(Index:unsigned,Name:symbol)
+.output live_register_name
+
+live_register_name(Index,Name):-
+    arch.lra_register(_,Index,Name).
+
+.decl lra_instruction(EA:address)
+
+lra_instruction(EA):-
+    code_in_refined_block(EA,_),
+    arch.lra_register(_,_,_).
+
+.decl lra_internal_call_edge(Block:address,Dest:address)
+
+lra_internal_call_edge(Block,Dest):-
+    cfg_edge(Block,Dest,_,_,"call"),
+    !plt_block(Dest,_).
+
+.decl lra_internal_call(Block:address)
+
+lra_internal_call(Block):-
+    lra_internal_call_edge(Block,_).
+
+// Follow a callee's branches and call continuations, not nested call edges.
+// Returns can belong to shared epilogues or another inferred function. Using
+// CFG reachability also includes conditional tail calls without trusting those
+// function boundaries to establish which caller values may be observed.
+.decl lra_callee_block(Entry:address,Block:address)
+
+lra_callee_block(Entry,Entry):-
+    lra_internal_call_edge(_,Entry).
+
+lra_callee_block(Entry,Next):-
+    lra_callee_block(Entry,Block),
+    cfg_edge(Block,Next,_,_,Type),
+    (Type = "branch"; Type = "fallthrough"),
+    !plt_block(Next,_).
+
+.decl lra_callee_return(Entry:address,EA:address)
+
+lra_callee_return(Entry,EA):-
+    lra_callee_block(Entry,Block),
+    refined_block_last_instruction(Block,EA),
+    arch.return(EA).
+
+.decl lra_call_continuation(Entry:address,Next:address)
+
+lra_call_continuation(Entry,Next):-
+    lra_internal_call_edge(Caller,Entry),
+    cfg_edge(Caller,Next,_,_,"fallthrough").
+
+.decl lra_next(EA:address,Next:address)
+
+// Sequential instructions within a basic block.
+lra_next(EA,Next):-
+    code_in_refined_block(EA,Block),
+    next(EA,Next),
+    code_in_refined_block(Next,Block).
+
+// Enter known callees rather than applying a calling-convention summary.
+lra_next(EA,Dest):-
+    refined_block_last_instruction(Block,EA),
+    lra_internal_call_edge(Block,Dest).
+
+// Ordinary inter-block edges, including continuation after external calls.
+lra_next(EA,Dest):-
+    refined_block_last_instruction(Block,EA),
+    cfg_edge(Block,Dest,_,_,Type),
+    Type != "call",
+    !lra_internal_call(Block).
+
+lra_next(EA,Dest):-
+    refined_block_last_instruction(Block,EA),
+    cfg_edge(Block,Dest,_,_,Type),
+    Type != "call",
+    Type != "fallthrough".
+
+// Return from known callees, including chains of recovered tail calls.
+lra_next(EA,Next):-
+    lra_callee_return(Entry,EA),
+    lra_call_continuation(Entry,Next).
+
+.decl lra_use(EA:address,Reg:register)
+
+lra_use(EA,Reg):-
+    lra_instruction(EA),
+    reg_def_use.used(EA,Reg,_),
+    arch.lra_register(Reg,_,_).
+
+lra_use(EA,Reg):-
+    lra_instruction(EA),
+    arch.lra_extra_use(EA,Reg),
+    arch.lra_register(Reg,_,_).
+
+// Relinking can replace a defined weak symbol with a different implementation.
+// Its current body therefore cannot establish dead inputs, even for a direct
+// call or tail branch. Retain every tracked register as for an unknown target.
+lra_use(EA,Reg):-
+    refined_block_last_instruction(Block,EA),
+    cfg_edge(Block,Dest,_,_,Type),
+    (Type = "call"; Type = "branch"),
+    defined_symbol(Dest,_,_,"WEAK",_,_,_,_,_),
+    arch.lra_register(Reg,_,_).
+
+// The kernel calling convention is not the ordinary function ABI. Without an
+// OS-specific summary, retain all tracked registers at the system-call boundary.
+lra_use(EA,Reg):-
+    lra_instruction(EA),
+    instruction(EA,_,_,Operation,_,_,_,_,_,_),
+    arch.syscall_operation(Operation),
+    arch.lra_register(Reg,_,_).
+
+.decl lra_external_call(EA:address)
+
+lra_external_call(EA):-
+    refined_block_last_instruction(Block,EA),
+    cfg_edge_to_symbol(Block,_,_,_,"call").
+
+lra_external_call(EA):-
+    refined_block_last_instruction(Block,EA),
+    cfg_edge_to_top(Block,_,"call").
+
+lra_external_call(EA):-
+    direct_call(EA,Dest),
+    plt_block(Dest,_).
+
+// External calls consume ABI argument registers.
+lra_use(EA,Reg):-
+    lra_external_call(EA),
+    arch.lra_argument_register(Reg),
+    arch.lra_register(Reg,_,_).
+
+// A direct external tail call consumes arguments and must preserve nonvolatile
+// registers for its caller.
+lra_use(EA,Reg):-
+    refined_block_last_instruction(Block,EA),
+    cfg_edge_to_symbol(Block,_,_,"false","branch"),
+    (
+        arch.lra_argument_register(Reg);
+        arch.lra_register(Reg,_,_),
+        !arch.lra_caller_saved(Reg)
+    ).
+
+// Without a complete target set, preserve every tracked register.
+lra_use(EA,Reg):-
+    lra_instruction(EA),
+    !arch.return(EA),
+    (
+        indirect_call(EA);
+        indirect_jump(EA);
+        reg_call(EA,_);
+        reg_jump(EA,_)
+    ),
+    arch.lra_register(Reg,_,_).
+
+.decl lra_written(EA:address,Reg:register)
+
+lra_written(EA,Reg):-
+    lra_instruction(EA),
+    register_access(EA,RegIn,"W"),
+    reg_map(RegIn,Reg),
+    !arch.register_access_override(EA,Reg,"W",0),
+    arch.lra_register_write_kills(RegIn,Reg).
+
+lra_written(EA,Reg):-
+    lra_instruction(EA),
+    arch.register_access_override(EA,Reg,"W",1),
+    arch.lra_register(Reg,_,_).
+
+.decl lra_kill(EA:address,Reg:register)
+
+lra_kill(EA,Reg):-
+    lra_written(EA,Reg),
+    !lra_use(EA,Reg).
+
+lra_kill(EA,Reg):-
+    lra_external_call(EA),
+    arch.lra_caller_saved(Reg),
+    !lra_use(EA,Reg).
+
+.decl lra_live_out(EA:address,Reg:register)
+.decl lra_live_in(EA:address,Reg:register)
+
+lra_live_out(EA,Reg):-
+    lra_next(EA,Next),
+    lra_live_in(Next,Reg).
+
+// A caller may observe preserved registers and ABI return values at a return.
+lra_live_out(EA,Reg):-
+    lra_instruction(EA),
+    arch.return(EA),
+    arch.lra_register(Reg,_,_),
+    (
+        !arch.lra_caller_saved(Reg);
+        arch.lra_return_register(Reg)
+    ).
+
+lra_live_in(EA,Reg):-
+    lra_use(EA,Reg).
+
+lra_live_in(EA,Reg):-
+    lra_live_out(EA,Reg),
+    !lra_kill(EA,Reg).
+
+.decl live_register(EA:address,Index:unsigned)
+.output live_register
+
+live_register(EA,Index):-
+    lra_live_in(EA,Reg),
+    arch.lra_register(Reg,Index,_).

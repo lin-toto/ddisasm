@@ -536,6 +536,45 @@ e.g., {r0-r3} for ARM32, {rcx,rdx,r8,r9} for Microsoft x64, etc.
 .decl integer_reg_param(Reg:register,Index:unsigned)
 
 /**
+Registers tracked by live-register analysis. Index identifies the register's
+bit in the output mask and Name is its GTIRB assembly name.
+*/
+.decl lra_register(Reg:register,Index:unsigned,Name:symbol)
+
+lra_register("",0,""):-
+    false.
+
+/** Registers whose values may be changed by a standard function call. */
+.decl lra_caller_saved(Reg:register)
+
+lra_caller_saved(""):-
+    false.
+
+/** Registers read when passing arguments to an external function. */
+.decl lra_argument_register(Reg:register)
+
+lra_argument_register(""):-
+    false.
+
+/** Registers carrying function return values. */
+.decl lra_return_register(Reg:register)
+
+lra_return_register(""):-
+    false.
+
+/** A write to RegIn completely replaces the tracked value in Reg. */
+.decl lra_register_write_kills(RegIn:input_reg,Reg:register)
+
+lra_register_write_kills("",""):-
+    false.
+
+/** Architecture-specific reads omitted by generic register-access metadata. */
+.decl lra_extra_use(EA:address,Reg:register)
+
+lra_extra_use(0,""):-
+    false.
+
+/**
 Floating-point registers
 */
 .decl float_reg(Reg:register,Size:unsigned)

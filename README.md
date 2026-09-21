@@ -33,6 +33,17 @@ Instruction Set Architectures (ISAs):
 -  RISCV32
 -  RISCV64
 
+RISC-V builds that process both word sizes must enable `DDISASM_RISCV_32` and
+`DDISASM_RISCV_64`. Ambiguous AUIPC pairs that remain incompletely symbolized
+produce warnings with both instruction addresses and the ambiguity reason.
+The `riscv_unresolved_pcrel_reference` output relation and the
+`riscvUnresolvedPcrelReferences` AuxData table record the same cases, even
+without debug output. The table has type
+`sequence<tuple<uint64_t,uint64_t,string>>`: original AUIPC address, original
+consumer address, and reason. An empty table means no such ambiguity was found;
+an absent table in older GTIRB is not evidence of that check. Rewriters must
+resolve nonempty diagnostics before relayout, not repair anchors by proximity.
+
 ## Getting Started
 
 You can run a prebuilt version of Ddisasm using Docker:

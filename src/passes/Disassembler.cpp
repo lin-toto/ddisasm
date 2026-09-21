@@ -568,6 +568,19 @@ bool isNullReg(const std::string &reg)
 void expandSymbolForwarding(gtirb::Module &Module, souffle::SouffleProgram &Program)
 {
     auto *SymbolForwarding = Module.getAuxData<gtirb::schema::SymbolForwarding>();
+    // PC-relative low relocations refer to instruction anchors, not callable
+    // entries. An anchor within a PLT stub must not forward to the external
+    // function, even though both symbols have the same original address.
+    std::set<gtirb::UUID> InstructionAnchors;
+    for(auto Expression : Module.symbolic_expressions())
+    {
+        if(const auto *Sym = std::get_if<gtirb::SymAddrConst>(&Expression.getSymbolicExpression());
+           Sym && Sym->Attributes.count(gtirb::SymAttribute::PCREL)
+           && Sym->Attributes.count(gtirb::SymAttribute::LO))
+        {
+            InstructionAnchors.insert(Sym->Sym->getUUID());
+        }
+    }
     for(auto &Output : *Program.getRelation("plt_block"))
     {
         gtirb::Addr Ea;
@@ -579,6 +592,8 @@ void expandSymbolForwarding(gtirb::Module &Module, souffle::SouffleProgram &Prog
         auto FoundDest = Module.findSymbols(Name);
         for(gtirb::Symbol &Src : FoundSrc)
         {
+            if(InstructionAnchors.count(Src.getUUID()))
+                continue;
             for(gtirb::Symbol &Dest : FoundDest)
             {
                 (*SymbolForwarding)[Src.getUUID()] = Dest.getUUID();
@@ -594,6 +609,8 @@ void expandSymbolForwarding(gtirb::Module &Module, souffle::SouffleProgram &Prog
         gtirb::Symbol *Dest = findFirstSymbol(Module, Name, true);
         for(gtirb::Symbol &Src : FoundSrc)
         {
+            if(InstructionAnchors.count(Src.getUUID()))
+                continue;
             (*SymbolForwarding)[Src.getUUID()] = Dest->getUUID();
         }
     }
@@ -745,6 +762,75 @@ void buildCodeBlocks(gtirb::Context &Context, gtirb::Module &Module,
             }
         }
     }
+}
+
+void buildLiveRegisters(gtirb::Module &Module, souffle::SouffleProgram &Program)
+{
+    std::vector<std::string> RegisterNames;
+    for(auto &Output : *Program.getRelation("live_register_name"))
+    {
+        uint64_t Index;
+        std::string Name;
+        Output >> Index >> Name;
+        if(Index >= 64)
+        {
+            std::cerr << "WARNING: live-register index " << Index << " is too large\n";
+            continue;
+        }
+        if(RegisterNames.size() <= Index)
+        {
+            RegisterNames.resize(Index + 1);
+        }
+        RegisterNames[Index] = std::move(Name);
+    }
+
+    Module.removeAuxData<gtirb::schema::LiveRegisterNames>();
+    Module.removeAuxData<gtirb::schema::LiveRegisterSets>();
+    if(RegisterNames.empty())
+    {
+        return;
+    }
+
+    std::map<gtirb::Addr, std::vector<gtirb::Offset>> InstructionOffsets;
+    gtirb::schema::LiveRegisterSets::Type RegisterSets;
+    for(auto &Output : *Program.getRelation("code_in_refined_block"))
+    {
+        gtirb::Addr EA, BlockAddress;
+        Output >> EA >> BlockAddress;
+        auto Blocks = Module.findCodeBlocksAt(BlockAddress);
+        for(gtirb::CodeBlock &Block : Blocks)
+        {
+            if(EA < BlockAddress || EA - BlockAddress >= Block.getSize())
+            {
+                continue;
+            }
+            gtirb::Offset Offset(Block.getUUID(), EA - BlockAddress);
+            // An instruction can belong to several overlapping refined blocks.
+            InstructionOffsets[EA].push_back(Offset);
+            RegisterSets.emplace(Offset, 0);
+        }
+    }
+
+    for(auto &Output : *Program.getRelation("live_register"))
+    {
+        gtirb::Addr EA;
+        uint64_t Index;
+        Output >> EA >> Index;
+        if(Index < 64)
+        {
+            auto It = InstructionOffsets.find(EA);
+            if(It != InstructionOffsets.end())
+            {
+                for(const gtirb::Offset &Offset : It->second)
+                {
+                    RegisterSets[Offset] |= uint64_t{1} << Index;
+                }
+            }
+        }
+    }
+
+    Module.addAuxData<gtirb::schema::LiveRegisterNames>(std::move(RegisterNames));
+    Module.addAuxData<gtirb::schema::LiveRegisterSets>(std::move(RegisterSets));
 }
 
 // Create DataObjects for labeled objects in the BSS sections, without adding
@@ -1669,6 +1755,23 @@ void buildArchInfo(gtirb::Module &Module, souffle::SouffleProgram &Program)
     }
 }
 
+void buildRiscvUnresolvedPcrelReferences(gtirb::Module &Module, souffle::SouffleProgram &Program)
+{
+    Module.removeAuxData<gtirb::schema::RiscvUnresolvedPcrelReferences>();
+    if(auto UnresolvedPcrel = Program.getRelation("riscv_unresolved_pcrel_reference"))
+    {
+        gtirb::schema::RiscvUnresolvedPcrelReferences::Type References;
+        for(auto &Output : *UnresolvedPcrel)
+        {
+            uint64_t High, Low;
+            std::string Reason;
+            Output >> High >> Low >> Reason;
+            References.emplace_back(High, Low, Reason);
+        }
+        Module.addAuxData<gtirb::schema::RiscvUnresolvedPcrelReferences>(std::move(References));
+    }
+}
+
 void removePreviousModuleContent(gtirb::Module &Module)
 {
     for(auto &Bi : Module.byte_intervals())
@@ -1711,6 +1814,7 @@ void disassembleModule(gtirb::Context &Context, gtirb::Module &Module,
     buildInferredSymbols(Context, Module, Program);
     buildSymbolForwarding(Context, Module, Program);
     buildCodeBlocks(Context, Module, Program);
+    buildLiveRegisters(Module, Program);
     buildDataBlocks(Context, Module, Program);
     buildAlignments(Module, Program);
     buildCodeSymbolicInformation(Module, Program);
@@ -1728,6 +1832,7 @@ void disassembleModule(gtirb::Context &Context, gtirb::Module &Module,
     updateEntryPoint(Module, Program);
     removeSymbolVersionsFromNames(Module);
     buildArchInfo(Module, Program);
+    buildRiscvUnresolvedPcrelReferences(Module, Program);
     if(Module.getISA() == gtirb::ISA::ARM)
     {
         shiftThumbBlocks(Module);
@@ -1811,6 +1916,21 @@ void performSanityChecks(AnalysisPassResult &Result, souffle::SouffleProgram &Pr
         Output >> Missing;
         ErrorMsg << "Missing Weight:" << Missing << std::endl;
         Messages.push_back(ErrorMsg.str());
+    }
+
+    if(auto UnresolvedPcrel = Program.getRelation("riscv_unresolved_pcrel_reference"))
+    {
+        for(auto &Output : *UnresolvedPcrel)
+        {
+            uint64_t High, Low;
+            std::string Reason;
+            Output >> High >> Low >> Reason;
+            std::stringstream WarnMsg;
+            WarnMsg << "unresolved RISC-V AUIPC pair at 0x" << std::hex << High
+                    << " -> 0x" << Low << " (" << Reason << "). "
+                    << "Retained numeric operands may not survive relayout.";
+            Result.Warnings.push_back(WarnMsg.str());
+        }
     }
 
     auto UnexpectedNegativeWeight = Program.getRelation("unexpected_negative_heuristic_weight");

@@ -154,6 +154,7 @@ set(DATALOG_BASE_SOURCES
     datalog/empty_range.dl
     datalog/basic_function_inference.dl
     datalog/jump_tables.dl
+    datalog/live_register_analysis.dl
     datalog/main.dl
     datalog/noreturn.dl
     datalog/pointer_reattribution.dl

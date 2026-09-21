@@ -89,6 +89,14 @@ namespace gtirb
             typedef std::set<auxdata::Relocation> Type;
         };
 
+        /// \brief Unresolved RISC-V PC-relative pairs that may not survive relayout.
+        /// Entries are {original high address, original low address, reason}.
+        struct RiscvUnresolvedPcrelReferences
+        {
+            static constexpr const char* Name = "riscvUnresolvedPcrelReferences";
+            typedef std::vector<std::tuple<uint64_t, uint64_t, std::string>> Type;
+        };
+
         /// \brief Auxiliary data describing a binary's dynamic entries.
         struct DynamicEntries
         {
@@ -109,6 +117,20 @@ namespace gtirb
         {
             static constexpr const char* Name = "ddisasmVersion";
             typedef std::string Type;
+        };
+
+        /// \brief Register names indexed by bits in LiveRegisterSets.
+        struct LiveRegisterNames
+        {
+            static constexpr const char* Name = "liveRegisterNames";
+            typedef std::vector<std::string> Type;
+        };
+
+        /// \brief Live-register bit masks at instruction offsets.
+        struct LiveRegisterSets
+        {
+            static constexpr const char* Name = "liveRegisterSets";
+            typedef std::map<gtirb::Offset, uint64_t> Type;
         };
 
         /// \brief Auxiliary data mapping PE load configuration field names to number values.

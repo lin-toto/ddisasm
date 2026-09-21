@@ -77,3 +77,46 @@ integer_reg_param("X4",5).
 integer_reg_param("X5",6).
 integer_reg_param("X6",7).
 integer_reg_param("X7",8).
+
+arch.lra_register(Reg,I,Name):-
+    I = range(0,29),
+    Reg = cat("X",to_string(I)),
+    Name = cat("x",to_string(I)).
+arch.lra_register("FP",29,"x29").
+arch.lra_register("LR",30,"x30").
+arch.lra_register("NZCV",31,"nzcv").
+
+arch.lra_caller_saved(Reg):-
+    I = range(0,19),
+    Reg = cat("X",to_string(I)).
+arch.lra_caller_saved("LR").
+arch.lra_caller_saved("NZCV").
+
+arch.lra_argument_register(Reg):-
+    arch.integer_reg_param(Reg,_).
+arch.lra_argument_register("X8").
+
+arch.lra_return_register("X0").
+arch.lra_return_register("X1").
+
+arch.lra_register_write_kills(RegIn,Reg):-
+    reg_map(RegIn,Reg),
+    arch.lra_register(Reg,_,_).
+
+// Capstone omits some source-register reads for aliases, stores, and test branches.
+arch.lra_extra_use(EA,Reg):-
+    instruction(EA,_,_,Operation,_,_,_,_,_,_),
+    (
+        Operation = "CMP";
+        Operation = "CMN";
+        Operation = "TST";
+        Operation = "CCMP";
+        Operation = "CCMN";
+        arch.test_jump_operation(Operation,_,_);
+        substr(Operation,0,2) = "ST"
+    ),
+    instruction_get_op(EA,_,Op),
+    (
+        op_regdirect_contains_reg(Op,Reg);
+        op_indirect_contains_reg(Op,Reg)
+    ).

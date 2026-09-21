@@ -140,8 +140,14 @@ data_access_size("LDP",as(Reg,register),Size):-
 reg_arithmetic_operation(EA,Dst,Src,1,Immediate):-
     instruction(EA,_,_,"ADD",Op1,Op2,Op3,0,_,_),
     op_regdirect_contains_reg(Op1,Src),
-    op_immediate(Op2,Immediate,_),
-    op_regdirect_contains_reg(Op3,Dst).
+    op_immediate(Op2,Value,_),
+    op_regdirect_contains_reg(Op3,Dst),
+    (
+        op_shifted(EA,2,Shift,"LSL"),
+        Immediate = Value * 2^as(Shift,number)
+        ;
+        !op_shifted(EA,2,_,_), Immediate = Value
+    ).
 
 // ADD reg, reg, reg
 reg_reg_arithmetic_operation(EA,Dst,Src1,Src2,Sign*Mult,0):-

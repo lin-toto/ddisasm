@@ -66,6 +66,9 @@ void registerAuxDataTypes()
     gtirb::AuxDataContainer::registerAuxDataType<LibraryPaths>();
     gtirb::AuxDataContainer::registerAuxDataType<SymbolicExpressionSizes>();
     gtirb::AuxDataContainer::registerAuxDataType<DdisasmVersion>();
+    gtirb::AuxDataContainer::registerAuxDataType<LiveRegisterNames>();
+    gtirb::AuxDataContainer::registerAuxDataType<LiveRegisterSets>();
+    gtirb::AuxDataContainer::registerAuxDataType<RiscvUnresolvedPcrelReferences>();
     gtirb::AuxDataContainer::registerAuxDataType<PeLoadConfig>();
     gtirb::AuxDataContainer::registerAuxDataType<PeImportedSymbols>();
     gtirb::AuxDataContainer::registerAuxDataType<PeExportedSymbols>();

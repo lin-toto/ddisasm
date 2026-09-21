@@ -750,6 +750,10 @@ pc_relative_indexed_data_use(DefEA,DataStart,LoadEA):-
     code_in_block_candidate(DefEA,_),
     code_in_block_candidate(LoadEA,_).
 
+// Bind the reachable instruction pair before looking up memory reads. Joining
+// first on the base register scans unrelated functions on every iteration.
+.plan 0: (5, 1, 4, 3, 2, 6), 1: (6, 4, 1, 3, 2, 5)
+
 /**
 Function extents and entries backed directly by input metadata.
 */
@@ -934,6 +938,9 @@ metadata_function_fixed_data_use(
     code_in_block_candidate(DefEA,_),
     code_in_block_candidate(LoadEA,_),
     Data = as(as(RefAddr,number) + Offset,address).
+
+// As for indexed uses, keep the memory-read lookup inside the reachable pair.
+.plan 0: (5, 1, 4, 3, 2, 6), 1: (6, 4, 1, 3, 2, 5)
 
 /**
 An acyclic counterpart used while constructing anonymous data candidates.

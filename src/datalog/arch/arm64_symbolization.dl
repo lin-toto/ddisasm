@@ -229,6 +229,37 @@ split_load_operand(EA, 1, as(Dest,address)) :-
 split_load_operand(EA, 2, as(Dest,address)) :-
     split_load_for_symbolization(_, EA, Dest, "ADD").
 
+// ADR preserves an exact address, so its consumer needs the byte difference
+// from that base, not the final target's page offset. Keep this distinction
+// through the existing register-copy and stack-spill provenance rules.
+.decl arm64_exact_base_operand(EA:address,Index:operand_index,Base:address,Dest:address)
+
+arm64_exact_base_operand(EA,Index,Base,Dest):-
+    split_load_for_symbolization(ADREA,EA,Dest,Type),
+    instruction_get_operation(ADREA,"ADR"),
+    arch.adr_dest(ADREA,_,Base),
+    !relocation(EA,_,_,_,_,_,_),
+    (
+        Type = "ADD", Index = 2;
+        Type = "LDR/STR", Index = 1
+    ).
+
+symbol_minus_symbol(EA+InstrOffset,Size,Base,Dest,1,0):-
+    arm64_exact_base_operand(EA,Index,Base,Dest),
+    code(EA),
+    (
+        instruction_immediate_offset(EA,Index,InstrOffset,Size);
+        instruction_displacement_offset(EA,Index,InstrOffset,Size)
+    ).
+
+// The high and low expressions must agree on which side of a section
+// boundary they denote, including after the sections move to different pages.
+boundary_sym_expr(EA,Dest,Reason):-
+    split_load_for_symbolization(EA,TailEA,Dest,"ADD"),
+    instruction_get_operation(EA,"ADRP"),
+    symbolic_operand(EA,1,Dest,"data"),
+    boundary_sym_expr(TailEA,Dest,Reason).
+
 
 // Linker-defined objects may lie in an alignment gap outside any section.
 // Express them relative to the relocatable end of their owning section.
@@ -310,11 +341,13 @@ symbolic_operand_attribute(EA,1,"GOT"),
 symbolic_operand_attribute(EA_ldr,1,"GOT"),
 symbolic_operand_attribute(EA_ldr,1,"LO12"):-
     split_load_for_symbolization(EA,EA_ldr,Dest,"LDR/STR"),
+    instruction_get_operation(EA,"ADRP"),
     !split_load_for_symbolization(EA,EA_ldr,Dest,"ADD"),
     arm64_got_slot(Dest).
 
 symbolic_operand_attribute(EA,1,"LO12"):-
     split_load_for_symbolization(EA0,EA,Dest,"LDR/STR"),
+    !arm64_exact_base_operand(EA,1,_,_),
     !relocation(EA,_,_,_,_,_,_),
     (
         !relocation(Dest,_,_,_,_,_,_),
@@ -332,6 +365,7 @@ symbolic_operand_attribute(EA,1,"LO12"):-
 
 symbolic_operand_attribute(EA,2,"LO12"):-
     split_load_for_symbolization(_,EA,Dest,"ADD"),
+    !arm64_exact_base_operand(EA,2,_,_),
     !relocation(EA,_,_,_,_,_,_),
     !relocation(as(Dest,address),"GLOB_DAT",_,_,_,_,_).
 

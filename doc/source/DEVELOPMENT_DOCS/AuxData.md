@@ -30,6 +30,63 @@ tables:
 For example, `1.5.3 (8533031c 2022-03-31) X64` represents version `1.5.3`
 compiled on commit `8533031c` with support for the `X64` ISA.
 
+## liveRegisterNames
+
+`unsanctioned`
+
+|       |                                                        |
+|------:|--------------------------------------------------------|
+|  Name | **liveRegisterNames**                                  |
+|  Type | `std::vector<std::string>`                             |
+| Value | Register names indexed by bits in `liveRegisterSets`.  |
+
+## liveRegisterSets
+
+`unsanctioned`
+
+|       |                                                                    |
+|------:|--------------------------------------------------------------------|
+|  Name | **liveRegisterSets**                                               |
+|  Type | `std::map<gtirb::Offset, uint64_t>`                                |
+| Value | Per-instruction live-in register masks for rewriting.              |
+
+Every decoded instruction has an entry, including instructions with an empty
+live-in set. A missing entry therefore means that liveness is unknown and
+should be handled conservatively. These tables are currently generated for
+X64, ARM64, RISCV32, and RISCV64 modules.
+
+X64 `rflags` tracks the six arithmetic flags (CF/PF/AF/ZF/SF/OF), not DF or
+other control flags. ADD, SUB, CMP, NEG, ADC and SBB completely define this
+value; ADC/SBB still require their incoming carry. Partial writes, shifts and
+instructions with undefined outputs remain conservative. Consumers must
+preserve non-arithmetic flags independently if they modify them. External-call
+ABI summaries remain separate from this instruction-write rule.
+
+Direct transfers to defined weak symbols keep all tracked registers live.
+Relinking may replace their implementation, so the current body cannot justify
+discarding inputs. Ordinary non-weak internal calls still use callee dataflow.
+
+## riscvUnresolvedPcrelReferences
+
+`unsanctioned`
+
+|       |                                                                     |
+|------:|---------------------------------------------------------------------|
+|  Name | **riscvUnresolvedPcrelReferences**                                   |
+|  Type | `std::vector<std::tuple<uint64_t, uint64_t, std::string>>`            |
+| Value | Original high/low instruction addresses and an unresolved-pair reason. |
+
+Generated for RISCV32 and RISCV64 modules, including an empty table when no
+unresolved AUIPC pairs are reported. The serialized schema is
+`sequence<tuple<uint64_t,uint64_t,string>>`. A missing table means the producer
+did not supply these diagnostics; it is not equivalent to an empty table.
+
+These are input-address diagnostics, not relocatable offsets. They are not
+updated during rewriting and must be checked before relayout. A nonempty table
+means the affected numeric references are not established as safe to move;
+consumers should resolve them in the frontend before rewriting. An empty table
+does not establish complete symbolization of every other reference.
+
 ## binaryType
 
 `unsanctioned`
