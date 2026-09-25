@@ -590,7 +590,13 @@ riscv_got_reference(GotEntry,Symbol,Addend):-
     !tls_descriptor(GotEntry,_),
     symbol(_,_,_,_,_,_,_,_,Symbol).
 
-riscv_got_reference(GotEntry,SymbolName,0):-
+// Keep resolved local slots as addresses until final symbol selection. Raw
+// symbol facts include mapping markers and duplicate local names; neither is
+// a unique printable identity. Using best_symexpr_symbol here would create a
+// negation cycle through the non-GOT split-load fallback below.
+.decl riscv_local_got_reference(GotEntry:address,Target:address)
+
+riscv_local_got_reference(GotEntry,as(Target,address)):-
     loaded_section(Beg,End,".got"),
     GotEntry >= Beg,
     GotEntry < End,
@@ -598,7 +604,7 @@ riscv_got_reference(GotEntry,SymbolName,0):-
     Target != 0,
     !tls_index(GotEntry,_),
     !tls_descriptor(GotEntry,_),
-    symbol(as(Target,address),_,_,_,_,_,_,_,SymbolName).
+    symbol(as(Target,address),_,_,_,_,_,_,_,_).
 
 // Static executables may have no dynamic relocation left for a resolved GOT
 // slot.  Use the lower-stratum raw pointer evidence for that slot so the
@@ -606,20 +612,25 @@ riscv_got_reference(GotEntry,SymbolName,0):-
 // direct PC-relative load from the target object.  Depending on final
 // symbolic_expr here would introduce a negation cycle through the ordinary
 // non-GOT split-load fallback below.
-riscv_got_reference(GotEntry,Symbol,0):-
+riscv_local_got_reference(GotEntry,Target):-
     loaded_section(Beg,End,".got"),
     GotEntry >= Beg,
     GotEntry < End,
+    !relocation(GotEntry,_,_,_,_,_,_),
     address_in_data_refined(GotEntry,Target),
+    Target != 0,
     !tls_index(GotEntry,_),
     !tls_descriptor(GotEntry,_),
-    symbol(Target,_,_,_,_,_,_,_,Symbol).
+    symbol(Target,_,_,_,_,_,_,_,_).
 
-.decl riscv_split_load_got(EAHi:address,EALo:address,IndexLo:operand_index,Symbol:symbol,Addend:number)
+.decl riscv_split_load_got(EAHi:address,EALo:address,IndexLo:operand_index)
 
-riscv_split_load_got(EAHi,EALo,IndexLo,Symbol,Addend):-
+riscv_split_load_got(EAHi,EALo,IndexLo):-
     riscv_split_load(EAHi,EALo,IndexLo,GotEntry),
-    riscv_got_reference(GotEntry,Symbol,Addend).
+    (
+        riscv_got_reference(GotEntry,_,_);
+        riscv_local_got_reference(GotEntry,_)
+    ).
 
 .decl riscv_global_pointer(GP:address)
 
@@ -890,18 +901,35 @@ symbolic_expr_attribute(EALo,"LO"):-
     !riscv_pcrel_plt_call(EAHi,EALo,_).
 
 symbolic_expr(EAHi+InstrOffset,Size,Symbol,Addend):-
-    riscv_split_load_got(EAHi,_,_,Symbol,Addend),
+    riscv_split_load(EAHi,_,_,GotEntry),
+    riscv_got_reference(GotEntry,Symbol,Addend),
     !riscv_ambiguous_split_hi(EAHi),
     instruction_immediate_offset(EAHi,1,InstrOffset,Size),
     !symbolic_expr_from_relocation(EAHi+InstrOffset,_,_,_,_),
     !symbol_minus_symbol_from_relocation(EAHi+InstrOffset,_,_,_,_,_),
     !symbol_minus_symbol(EAHi+InstrOffset,_,_,_,_,_).
 
+labeled_ea(Target):-
+    riscv_split_load(EAHi,_,_,GotEntry),
+    !riscv_ambiguous_split_hi(EAHi),
+    riscv_local_got_reference(GotEntry,Target).
+
+symbolic_expr(EAHi+InstrOffset,Size,Symbol,0),
+symbolic_expr_symbol_address(EAHi+InstrOffset,1,Symbol,Target):-
+    riscv_split_load(EAHi,_,_,GotEntry),
+    riscv_local_got_reference(GotEntry,Target),
+    !riscv_ambiguous_split_hi(EAHi),
+    instruction_immediate_offset(EAHi,1,InstrOffset,Size),
+    !symbolic_expr_from_relocation(EAHi+InstrOffset,_,_,_,_),
+    !symbol_minus_symbol_from_relocation(EAHi+InstrOffset,_,_,_,_,_),
+    !symbol_minus_symbol(EAHi+InstrOffset,_,_,_,_,_),
+    best_symexpr_symbol(Target,Symbol,"Beg").
+
 symbolic_expr(EAHi+InstrOffset,Size,SymbolName,Offset),
 symbolic_expr_symbol_address(EAHi+InstrOffset,1,SymbolName,FinalDest):-
     riscv_split_load(EAHi,_,_,Dest),
     !riscv_ambiguous_split_hi(EAHi),
-    !riscv_split_load_got(EAHi,_,_,_,_),
+    !riscv_split_load_got(EAHi,_,_),
     instruction_immediate_offset(EAHi,1,InstrOffset,Size),
     !symbolic_expr_from_relocation(EAHi+InstrOffset,_,_,_,_),
     !symbol_minus_symbol_from_relocation(EAHi+InstrOffset,_,_,_,_,_),
@@ -1024,7 +1052,7 @@ symbolic_expr_symbol_address(EA+InstrOffset,2,SymbolName,Dest):-
     best_symexpr_symbol(Dest,SymbolName,"Beg").
 
 symbolic_operand_attribute(EAHi,1,"GOT"):-
-    riscv_split_load_got(EAHi,_,_,_,_).
+    riscv_split_load_got(EAHi,_,_).
 
 symbolic_operand_attribute(EAHi,1,"PLT"):-
     riscv_pcrel_plt_call(EAHi,_,_).
@@ -1042,7 +1070,7 @@ symbolic_operand_attribute(EALo,IndexLo,"LO"):-
 symbolic_operand_attribute(EAHi,1,"PCREL"),
 symbolic_operand_attribute(EAHi,1,"HI"):-
     riscv_split_load(EAHi,_,_,_),
-    !riscv_split_load_got(EAHi,_,_,_,_).
+    !riscv_split_load_got(EAHi,_,_).
 
 symbolic_operand_attribute(EALo,IndexLo,"PCREL"),
 symbolic_operand_attribute(EALo,IndexLo,"LO"):-
