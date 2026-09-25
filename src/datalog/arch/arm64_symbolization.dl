@@ -26,6 +26,17 @@ ARM64 architecture-specific rules for symbolization
 
 avoid_symbols("$x").
 
+// Capstone represents literal LDR/LDRSW targets as absolute immediates, but
+// the encoding is PC-relative in both EXEC and DYN files. Do not rely on the
+// EXEC-only numeric-immediate heuristic: relinking a DSO must relocate these
+// references too. Register and base+displacement loads do not match this form.
+pc_relative_operand(EA,1,as(Target,address)):-
+    instruction(EA,_,_,Operation,ImmOp,RegOp,0,0,_,_),
+    (Operation = "LDR"; Operation = "LDRSW"),
+    op_immediate(ImmOp,Target,_),
+    op_regdirect_contains_reg(RegOp,_),
+    !instruction_has_relocation(EA,_).
+
 /**
 Compute an immediate load performed across two consecutive instructions
 */

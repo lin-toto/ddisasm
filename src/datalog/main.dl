@@ -468,7 +468,7 @@ next(EA,EA+Size):-
 
 /**
 EA has a PC-relative operand at Index, which is computed and stored in Dest.
-NOTE: Currently, we define pc_relative_operand only for X64.
+Additional instruction forms are defined in architecture-specific rules.
 */
 .decl pc_relative_operand(EA:address,Index:operand_index,Dest:address)
 
