@@ -289,7 +289,8 @@ riscv_split_load_zero_addi_alias(EAHi,EALo,Dest):-
     riscv_auipc_split_use(EAHi,Reg,EALo),
     instruction(EALo,4,_, "MV", OpSrc, OpDst, 0, 0, _, _),
     op_regdirect_contains_reg(OpSrc,Reg),
-    op_regdirect_contains_reg(OpDst,Reg),
+    // ADDI's zero-immediate alias may also copy into a different register.
+    op_regdirect_contains_reg(OpDst,_),
     (
         code(Dest)
         ;
@@ -775,6 +776,16 @@ block_must_not_merge(EAHi):-
 
 .decl riscv_split_load_section_end(EAHi:address,EALo:address,Dest:address)
 
+.decl riscv_address_materialization_pair(EAHi:address,EALo:address,Dest:address)
+
+riscv_address_materialization_pair(EAHi,EALo,Dest):-
+    (
+        riscv_split_load(EAHi,EALo,_,Dest);
+        riscv_symbolic_absolute_split_load(EAHi,EALo,_,Dest)
+    ),
+    // A load's destination contains the memory value, not the address.
+    !arch.memory_access(_,EALo,_,_,_,_,_,_,_).
+
 .decl riscv_materialized_address_def(EA:address,Reg:register,Dest:address)
 
 riscv_materialized_address_def(EA,Reg,Dest):-
@@ -782,22 +793,38 @@ riscv_materialized_address_def(EA,Reg,Dest):-
     reg_def_use.def(EA,Reg).
 
 riscv_materialized_address_def(EALo,Reg,Dest):-
-    riscv_split_load(EAHi,EALo,_,Dest),
-    riscv_auipc(EAHi,Reg,_).
-
-riscv_materialized_address_def(EALo,Reg,Dest):-
-    riscv_symbolic_absolute_split_load(EAHi,EALo,_,Dest),
-    riscv_lui(EAHi,Reg,_).
+    riscv_address_materialization_pair(_,EALo,Dest),
+    instruction_get_dest_op(EALo,_,Op),
+    op_regdirect_contains_reg(Op,Reg).
 
 riscv_split_load_section_end(EAHi,EALo,Dest):-
-    riscv_split_load(EAHi,EALo,_,Dest),
+    riscv_address_materialization_pair(EAHi,EALo,Dest),
     loaded_section(Beg,Dest,_),
     reg_def_use.def_used(EALo,EndReg,EASub,_),
-    arch.reg_reg_arithmetic_operation(EASub,_,EndReg,StartReg,-1,0),
+    (
+        arch.reg_reg_arithmetic_operation(EASub,_,EndReg,StartReg,-1,0);
+        cmp_reg_to_reg(EASub,EndReg,StartReg)
+    ),
     reg_def_use.def_used(EAStart,StartReg,EASub,_),
     riscv_materialized_address_def(EAStart,StartReg,Start),
     Start >= Beg,
     Start < Dest.
+
+boundary_sym_expr(EALo,Dest,"split-load section end"):-
+    riscv_split_load_section_end(_,EALo,Dest).
+
+// An upper fragment and all of its consumers for the same completed address
+// must choose the same side of a section boundary. Otherwise a comparison can
+// use the preceding array's end while the loop cursor uses the next section's
+// beginning; those addresses cease to coincide after relayout. Do not spread
+// this evidence to independent constructions of the same numeric address.
+boundary_sym_expr(EAHi,Dest,Reason):-
+    riscv_address_materialization_pair(EAHi,EALo,Dest),
+    boundary_sym_expr(EALo,Dest,Reason).
+
+boundary_sym_expr(EALo,Dest,Reason):-
+    riscv_address_materialization_pair(EAHi,EALo,Dest),
+    boundary_sym_expr(EAHi,Dest,Reason).
 
 symbolic_expr(EAHi+InstrOffset,Size,Symbol,0):-
     riscv_pcrel_plt_call(EAHi,_,Symbol),

@@ -70,6 +70,11 @@ Value of register 'Reg' at address 'EA' is a GOT-relative base reference.
 //    call _x86.get_pc_thunk.REG
 //    add REG, _GLOBAL_OFFSET_TABLE_
 reg_has_got(EA,Reg):-
+    // This is the i386 GOTOFF addressing model, whose expressions are emitted
+    // by x86_32_symbolization.dl. A numeric coincidence with the GOT start on
+    // another ISA is not GOT-base provenance: an AArch64 array-end cursor can
+    // have that value and still use an ordinary negative pre-index increment.
+    binary_isa("X86"),
     value_reg(EA,Reg,_,"NONE",_,Offset,_),
     got_section(Name),
     loaded_section(as(Offset,address),_,Name).
