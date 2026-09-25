@@ -198,14 +198,24 @@ riscv_pcrel_control_transfer(EAHi,EALo,2,Dest):-
     op_regdirect_contains_reg(RegOp,Reg),
     Dest = as(as(Base,number)+Offset,address).
 
-// Capstone renders `jalr ra, reg, 0` using the one-operand `jalr reg`
-// alias.  Recover that zero-offset form as well.  Requiring operands two
-// through four to be absent keeps this rule disjoint from the expanded form
-// above, where the immediate contributes to the destination.
+// Zero-offset JR/JALR aliases, including their compressed encodings, expose
+// only the base register. They still need a symbolic low half: after relayout
+// the target need not remain at the AUIPC page offset, and the printer must
+// expand a compressed transfer to an ordinary JALR when necessary.
+.decl riscv_zero_offset_transfer_operation(Operation:symbol)
+
+riscv_zero_offset_transfer_operation("JALR").
+riscv_zero_offset_transfer_operation("JR").
+riscv_zero_offset_transfer_operation("C.JALR").
+riscv_zero_offset_transfer_operation("C.JR").
+
+// Requiring operands two through four to be absent keeps this disjoint from
+// expanded forms, whose immediate contributes to the destination.
 riscv_pcrel_control_transfer(EAHi,EALo,1,Dest):-
     riscv_auipc(EAHi,Reg,Dest),
     next(EAHi,EALo),
-    instruction(EALo,_,_,"JALR",RegOp,0,0,0,_,_),
+    instruction(EALo,_,_,Operation,RegOp,0,0,0,_,_),
+    riscv_zero_offset_transfer_operation(Operation),
     op_regdirect_contains_reg(RegOp,Reg).
 
 riscv_pcrel_control_transfer(EAHi,EALo,2,Dest):-
@@ -877,16 +887,16 @@ symbolic_expr_symbol_address(EALo+InstrOffset,1,SymbolName,EAHi):-
     !symbol_minus_symbol(EALo+InstrOffset,_,_,_,_,_),
     riscv_pcrel_anchor_symbol(EAHi,SymbolName).
 
-// The one-operand `jalr reg` alias has an encoded zero I-immediate but
-// Capstone exposes no immediate operand for instruction_immediate_offset.
-// Attach the LO expression to the whole instruction so a relayout can still
-// recompute the low 12 bits.  The RISC-V printer expands this alias back to
-// `jalr ra,reg,%pcrel_lo(anchor)` when the expression is present.
+// One-register transfer aliases have an implicit zero low offset but no
+// immediate operand for instruction_immediate_offset. Attach the LO expression
+// to the whole instruction, including two-byte compressed transfers. The
+// printer expands these to JALR with the original link-register destination.
 symbolic_expr(EALo,Size,SymbolName,0),
 symbolic_expr_symbol_address(EALo,1,SymbolName,EAHi):-
     riscv_pcrel_control_transfer(EAHi,EALo,1,_),
     !riscv_pcrel_plt_call(EAHi,EALo,_),
-    instruction(EALo,Size,_,"JALR",_,0,0,0,_,_),
+    instruction(EALo,Size,_,Operation,_,0,0,0,_,_),
+    riscv_zero_offset_transfer_operation(Operation),
     !symbolic_expr_from_relocation(EALo,_,_,_,_),
     !symbol_minus_symbol_from_relocation(EALo,_,_,_,_,_),
     !symbol_minus_symbol(EALo,_,_,_,_,_),
