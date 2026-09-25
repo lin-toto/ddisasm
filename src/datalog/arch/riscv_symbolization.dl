@@ -1120,6 +1120,21 @@ riscv_relative_jump_table_access(EAJump,TableStart,EALoad,RegIndexScaled):-
     reg_jump(EAJump,RegJump),
     code(EAJump).
 
+// Each recursive version starts from its newly discovered facts and follows
+// connected def-use edges.  In particular, do not pair every split address
+// with every scaled index before checking whether their definitions reach
+// the same addition.  The predicates and accepted jump-table patterns are
+// unchanged; only the join order differs.  Versions 0/1 use split/scale facts;
+// versions 2..7 use the six def_used atoms in their source order.
+.plan 0: (1, 5, 4, 3, 2, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15),
+      1: (2, 3, 4, 5, 1, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15),
+      2: (3, 2, 4, 5, 1, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15),
+      3: (5, 1, 4, 3, 2, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15),
+      4: (6, 7, 8, 9, 4, 3, 2, 5, 1, 10, 11, 12, 13, 14, 15),
+      5: (10, 7, 8, 9, 11, 13, 14, 15, 12, 1, 6, 4, 5, 3, 2),
+      6: (12, 11, 13, 14, 15, 1, 10, 7, 8, 9, 6, 4, 5, 3, 2),
+      7: (13, 14, 15, 11, 10, 7, 8, 9, 12, 1, 6, 4, 5, 3, 2)
+
 riscv_relative_jump_table_base(EAJump,TableStart):-
     riscv_relative_jump_table_access(EAJump,TableStart,_,_).
 

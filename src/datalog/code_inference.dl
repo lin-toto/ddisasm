@@ -733,13 +733,18 @@ an arbitrary PC-relative address into a data extent.
 .decl metadata_function_entry_between(Beg:address,End:address)
 
 metadata_function_entry_between(Beg,End):-
-    arch.pc_relative_addr(Beg,BaseReg,_),
-    arch.memory_read(End,_,BaseReg,_,_,_,_),
     metadata_function_extent(FuncBeg,FuncEnd),
-    Beg >= FuncBeg,
-    End < FuncEnd,
     metadata_function_entry(EA),
+    // These bounds follow from FuncBeg <= Beg < EA <= End < FuncEnd.
+    // Test for an interior entry first: most function extents have none,
+    // so their unrelated same-register definitions/loads need not be joined.
+    EA > FuncBeg,
+    EA < FuncEnd,
+    arch.pc_relative_addr(Beg,BaseReg,_),
+    Beg >= FuncBeg,
     EA > Beg,
+    arch.memory_read(End,_,BaseReg,_,_,_,_),
+    End < FuncEnd,
     EA <= End.
 
 pc_relative_indexed_data_use(DefEA,DataStart,LoadEA):-
@@ -873,13 +878,13 @@ metadata_function_instruction_reachable(
     possible_ea(Next).
 
 register_redefined_between(DefEA,UseEA,Reg):-
-    arch.pc_relative_addr(DefEA,Reg,_),
-    arch.memory_read(UseEA,_,Reg,_,_,_,_),
     metadata_function_instruction_reachable(
         DefEA,_,FuncEnd,RedefEA),
-    UseEA < FuncEnd,
+    arch.pc_relative_addr(DefEA,Reg,_),
     basic_reg_def_use.def(RedefEA,Reg),
     RedefEA > DefEA,
+    arch.memory_read(UseEA,_,Reg,_,_,_,_),
+    UseEA < FuncEnd,
     RedefEA < UseEA.
 
 /**
@@ -900,9 +905,11 @@ form a binary-wide register-name cross product.
 
 pc_relative_moved_base_redefined_between(
         DefEA,MoveEA,UseEA,BaseReg):-
+    metadata_function_instruction_reachable(
+        DefEA,FuncBeg,FuncEnd,MoveEA),
+    arch.move_reg_reg(MoveEA,BaseReg,SourceReg),
     arch.pc_relative_addr(DefEA,SourceReg,_),
     straight_line_def_used(DefEA,SourceReg,MoveEA,_),
-    arch.move_reg_reg(MoveEA,BaseReg,SourceReg),
     BaseReg != SourceReg,
     arch.pointer_size(PointerSize),
     instruction_get_src_op(MoveEA,_,SourceOp),
@@ -913,16 +920,14 @@ pc_relative_moved_base_redefined_between(
     op_regdirect(BaseOp,BaseInputReg),
     reg_map(BaseInputReg,BaseReg),
     arch.register_size_bytes(BaseInputReg,PointerSize),
-    arch.memory_read(UseEA,_,BaseReg,_,_,_,_),
-    UseEA > MoveEA,
-    metadata_function_instruction_reachable(
-        DefEA,FuncBeg,FuncEnd,MoveEA),
-    metadata_function_instruction_reachable(
-        DefEA,FuncBeg,FuncEnd,UseEA),
     metadata_function_instruction_reachable(
         DefEA,FuncBeg,FuncEnd,RedefEA),
     basic_reg_def_use.def(RedefEA,BaseReg),
     RedefEA > MoveEA,
+    metadata_function_instruction_reachable(
+        DefEA,FuncBeg,FuncEnd,UseEA),
+    arch.memory_read(UseEA,_,BaseReg,_,_,_,_),
+    UseEA > MoveEA,
     RedefEA < UseEA.
 
 .decl metadata_function_fixed_data_use(
@@ -968,17 +973,18 @@ loaded byte range.
 
 metadata_function_reachable_fixed_data_use(
         DefEA,RefAddr,LoadEA,Data,AccessSize):-
+    // Bind the function-local instruction pair before joining memory reads.
+    metadata_function_instruction_reachable(
+        DefEA,FuncBeg,FuncEnd,LoadEA),
     arch.pc_relative_addr(DefEA,BaseReg,RefAddr),
-    arch.memory_read(
-        LoadEA,_,BaseReg,"NONE",_,Offset,AccessSize),
     metadata_function_extent(FuncBeg,FuncEnd),
     DefEA >= FuncBeg,
     DefEA < FuncEnd,
     metadata_function_entry_reachable(FuncBeg,FuncEnd,DefEA),
     LoadEA > DefEA,
     LoadEA < FuncEnd,
-    metadata_function_instruction_reachable(
-        DefEA,FuncBeg,FuncEnd,LoadEA),
+    arch.memory_read(
+        LoadEA,_,BaseReg,"NONE",_,Offset,AccessSize),
     !register_redefined_between(DefEA,LoadEA,BaseReg),
     Data = as(as(RefAddr,number) + Offset,address).
 
@@ -988,9 +994,12 @@ metadata_function_reachable_fixed_data_use(
 // additional evidence, so later unlabeled code is not swept into the pool.
 metadata_function_reachable_fixed_data_use(
         DefEA,RefAddr,LoadEA,Data,AccessSize):-
+    // Bind the definition, move, and function before looking up loads.
+    metadata_function_instruction_reachable(
+        DefEA,FuncBeg,FuncEnd,MoveEA),
+    arch.move_reg_reg(MoveEA,BaseReg,SourceReg),
     arch.pc_relative_addr(DefEA,SourceReg,RefAddr),
     straight_line_def_used(DefEA,SourceReg,MoveEA,_),
-    arch.move_reg_reg(MoveEA,BaseReg,SourceReg),
     BaseReg != SourceReg,
     arch.pointer_size(PointerSize),
     instruction_get_src_op(MoveEA,_,SourceOp),
@@ -1001,8 +1010,6 @@ metadata_function_reachable_fixed_data_use(
     op_regdirect(BaseOp,BaseInputReg),
     reg_map(BaseInputReg,BaseReg),
     arch.register_size_bytes(BaseInputReg,PointerSize),
-    arch.memory_read(
-        LoadEA,_,BaseReg,"NONE",_,Offset,AccessSize),
     metadata_function_extent(FuncBeg,FuncEnd),
     DefEA >= FuncBeg,
     DefEA < FuncEnd,
@@ -1012,9 +1019,9 @@ metadata_function_reachable_fixed_data_use(
     LoadEA > MoveEA,
     LoadEA < FuncEnd,
     metadata_function_instruction_reachable(
-        DefEA,FuncBeg,FuncEnd,MoveEA),
-    metadata_function_instruction_reachable(
         DefEA,FuncBeg,FuncEnd,LoadEA),
+    arch.memory_read(
+        LoadEA,_,BaseReg,"NONE",_,Offset,AccessSize),
     !pc_relative_moved_base_redefined_between(
         DefEA,MoveEA,LoadEA,BaseReg),
     Data = as(as(RefAddr,number) + Offset,address).
