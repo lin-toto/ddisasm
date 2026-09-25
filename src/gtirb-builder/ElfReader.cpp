@@ -1216,7 +1216,10 @@ void ElfReader::addAuxData()
 
         if(Relocation.has_symbol())
         {
-            auto Symbol = *Relocation.symbol();
+            // LIEF's Symbol copy constructor drops its symbol_version link.
+            // Keep the original symbol: name/type/value alone cannot distinguish
+            // imports of different versions, whose values are all zero.
+            const auto &Symbol = *Relocation.symbol();
 
             SymbolName = Symbol.name();
             auto SymbolVersion = Symbol.symbol_version();
