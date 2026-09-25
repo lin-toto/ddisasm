@@ -1412,11 +1412,17 @@ bounded_subpointer_width_access(
     AccessSize > 0,
     AccessSize < Pt_size,
     Pt_size % AccessSize = 0,
-    arch.load(
-        LoadEA,OpIndex,_,_,BaseReg,IndexReg,Scale,MemOffset),
     data_access(
         LoadEA,OpIndex,"NONE",BaseReg,IndexReg,
         Scale,MemOffset,AccessSize),
+    // This is field-width evidence, not a memory-to-register value transfer.
+    // A bounded XOR/ADD/CMP memory operand reads the same narrow scalar cells
+    // as MOV. Keep arch.load's stronger value-analysis contract unchanged.
+    (
+        arch.load(LoadEA,OpIndex,_,_,BaseReg,IndexReg,Scale,MemOffset)
+        ;
+        instruction_get_src_op(LoadEA,OpIndex,_)
+    ),
     reg_nonnull(IndexReg,IndexReg_nn),
     Scale = as(AccessSize,number),
     value_reg_at_operand(
