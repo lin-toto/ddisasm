@@ -11,6 +11,43 @@ from disassemble_reassemble_check import disassemble
 
 @unittest.skipUnless(shutil.which("gcc"), "x64 compiler required")
 class X64LiveRegistersTest(unittest.TestCase):
+    def test_memory_test_keeps_register_input_live(self):
+        # TEST does not write either operand. Capstone 5 omits the register
+        # source of the memory-first Intel form from its read-access facts.
+        # It must remain live through the preceding store's instrumentation.
+        cases = (("b", "%sil"), ("w", "%si"), ("l", "%esi"), ("q", "%rsi"))
+        source = ".text\n.globl _start\n.type _start,@function\n_start:\n"
+        source += "".join(f"call check_test_{suffix}\n" for suffix, _ in cases)
+        source += "mov $60,%eax\nxor %edi,%edi\nsyscall\n.size _start,.-_start\n"
+        for suffix, register in cases:
+            source += f"""
+            .globl check_test_{suffix}
+            .type check_test_{suffix},@function
+            check_test_{suffix}:
+                movl $0,(%rdi)
+                test{suffix} {register},(%rdi)
+                sete %al
+                mov $0,%esi
+                ret
+            .size check_test_{suffix},.-check_test_{suffix}
+            """
+        source += '.section .note.GNU-stack,"",@progbits\n'
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            assembly = root / "test.S"
+            assembly.write_text(source)
+            binary = root / "test"
+            subprocess.run(["gcc", "-nostdlib", "-no-pie", str(assembly), "-o", str(binary)], check=True)
+            module = disassemble(binary).ir().modules[0]
+            live = module.aux_data["liveRegisterSets"].data
+            bit = 1 << module.aux_data["liveRegisterNames"].data.index("rsi")
+            decoder = GtirbInstructionDecoder(gtirb.Module.ISA.X64)
+            for suffix, _ in cases:
+                block = next(module.symbols_named("check_test_" + suffix)).referent
+                for instruction in list(decoder.get_instructions(block))[:2]:
+                    with self.subTest(width=suffix, instruction=instruction.mnemonic):
+                        self.assertTrue(live[gtirb.Offset(block, instruction.address - block.address)] & bit)
+
     def test_arithmetic_flags_kills_and_preserved_inputs(self):
         # Expected liveness immediately before the writer. ADC/SBB replace all
         # arithmetic outputs but still consume the incoming carry flag.

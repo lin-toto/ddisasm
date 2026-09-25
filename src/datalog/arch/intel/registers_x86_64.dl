@@ -241,3 +241,14 @@ arch.lra_extra_use(EA,Reg):-
 arch.register_access_override(EA,Reg,"R",1):-
     instruction(EA,_,_,"ADOX",_,Destination,0,0,_,_),
     op_regdirect_contains_reg(Destination,Reg).
+
+// TEST consumes both value operands and writes only flags. Capstone 5 marks
+// the register source of TEST r/m,reg as write-only. Correct both sides of
+// the access contract, including subregister forms, before use/def and LRA.
+arch.register_access_override(EA,Reg,"R",1):-
+    instruction(EA,_,_,"TEST",Op1,Op2,0,0,_,_),
+    (op_regdirect_contains_reg(Op1,Reg); op_regdirect_contains_reg(Op2,Reg)).
+
+arch.register_access_override(EA,Reg,"W",0):-
+    instruction(EA,_,_,"TEST",Op1,Op2,0,0,_,_),
+    (op_regdirect_contains_reg(Op1,Reg); op_regdirect_contains_reg(Op2,Reg)).
