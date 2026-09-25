@@ -1124,6 +1124,18 @@ void connectSymbolsToBlocks(gtirb::Context &Context, gtirb::Module &Module,
     std::map<gtirb::Symbol *, std::tuple<gtirb::Node *, bool>> ConnectToBlock;
     for(auto &Symbol : Module.symbols_by_addr())
     {
+        // ELF absolute values are not section-relative addresses. A constant
+        // can numerically coincide with a block (including a skipped unwind
+        // section); binding it there makes it move or disappear on relayout.
+        if(SymbolInfo)
+        {
+            constexpr uint64_t SHN_ABS = 0xfff1;
+            auto It = SymbolInfo->find(Symbol.getUUID());
+            if(It != SymbolInfo->end() && std::get<4>(It->second) == SHN_ABS)
+            {
+                continue;
+            }
+        }
         if(Symbol.getAddress())
         {
             gtirb::Addr Addr = *Symbol.getAddress();
@@ -2033,3 +2045,4 @@ void performSanityChecks(AnalysisPassResult &Result, souffle::SouffleProgram &Pr
         Result.Warnings.push_back(WarnMsg.str());
     }
 }
+
