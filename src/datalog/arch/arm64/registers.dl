@@ -103,6 +103,24 @@ arch.lra_register_write_kills(RegIn,Reg):-
     reg_map(RegIn,Reg),
     arch.lra_register(Reg,_,_).
 
+// Capstone can mark the first register of a flag-only alias as a destination
+// (for example CMP X0,X1). These instructions read all explicit registers and
+// write only NZCV. Correct def/use as well as liveness: a fictitious GPR write
+// otherwise severs pointer provenance at the comparison itself.
+.decl arm64_flag_only_alias(Operation:symbol)
+arm64_flag_only_alias("CMP").
+arm64_flag_only_alias("CMN").
+arm64_flag_only_alias("TST").
+arm64_flag_only_alias("CCMP").
+arm64_flag_only_alias("CCMN").
+
+arch.register_access_override(EA,Reg,"R",1),
+arch.register_access_override(EA,Reg,"W",0):-
+    instruction_get_operation(EA,Operation),
+    arm64_flag_only_alias(Operation),
+    instruction_get_op(EA,_,Op),
+    op_regdirect_contains_reg(Op,Reg).
+
 // Capstone omits some source-register reads for aliases, stores, and test branches.
 arch.lra_extra_use(EA,Reg):-
     instruction(EA,_,_,Operation,_,_,_,_,_,_),
