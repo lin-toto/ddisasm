@@ -336,6 +336,21 @@ arm64_got_slot(GotEntry):-
     symbol(_,_,_,_,_,_,_,SymbolIndex,Symbol).
 
 arm64_got_slot(GotEntry):-
+    // A linker-local/hidden definition can leave a RELATIVE relocation in
+    // an actual GOT slot. Its addend identifies the resolved symbol, rather
+    // than a dynamic-symbol index. Do not extend this to ordinary .data:
+    // ADRP+LDR of a relocated pointer there is not a GOT access.
+    loaded_section(Beg,End,".got"),
+    Beg <= GotEntry, GotEntry < End,
+    arch.pointer_size(Ptr),
+    GotEntry % Ptr = 0,
+    relocation(GotEntry,"RELATIVE","",Target,_,_,_),
+    Target != 0,
+    !tls_index(GotEntry,_),
+    !tls_descriptor(GotEntry,_),
+    symbol(as(Target,address),_,_,_,_,_,_,_,_).
+
+arm64_got_slot(GotEntry):-
     loaded_section(Beg,End,".got"),
     Beg <= GotEntry, GotEntry < End,
     arch.pointer_size(Ptr),
