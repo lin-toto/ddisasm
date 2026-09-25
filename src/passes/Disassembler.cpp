@@ -1004,8 +1004,19 @@ void buildDataBlocks(gtirb::Context &Context, gtirb::Module &Module,
                     // string
                     else if(const auto S = DataStrings.find(CurrentAddr); S != DataStrings.end())
                     {
-                        DataBlock = gtirb::DataBlock::Create(Context, S->End - CurrentAddr);
-                        TypesTable[DataBlock->getUUID()] = S->Encoding;
+                        // A relocation can name an interior string suffix.
+                        // Honor that label just as for ordinary data, otherwise
+                        // its symbol remains integral and cannot move at relink.
+                        auto NextBoundary = DataBoundary.upper_bound(CurrentAddr);
+                        auto StringEnd = S->End;
+                        if(NextBoundary != DataBoundary.end() && *NextBoundary < StringEnd)
+                            StringEnd = *NextBoundary;
+                        DataBlock = gtirb::DataBlock::Create(Context, StringEnd - CurrentAddr);
+                        // A truncated prefix need not end in NUL (or even at a
+                        // character boundary). Emit its exact raw bytes rather
+                        // than retaining a whole-string encoding annotation.
+                        if(StringEnd == S->End)
+                            TypesTable[DataBlock->getUUID()] = S->Encoding;
                     }
                     else
                     {
