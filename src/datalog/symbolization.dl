@@ -1532,6 +1532,155 @@ innermost_source_object_containing_candidate(
     !more_specific_source_object_containing_candidate(
         EA,Pt_size,SrcBeg,SrcSize).
 
+// Arrays of records can interleave several pointer fields and contain null
+// entries. The nearest-address heuristic cannot see a column through a
+// different pointer column. Infer a column only from three non-null entries
+// in the first three records of one sized OBJECT. Its stride must divide the
+// object size; subsequent entries must be pointers into the same data segment
+// or null. A scalar word, section change or original source boundary stops
+// propagation. This is source-layout evidence, not a new arch.load/value fact.
+.decl object_data_pointer_field(EA:address,SrcBeg:address,SrcSize:unsigned,
+                                Range:address,DestBeg:address,DestEnd:address)
+
+object_data_pointer_field(EA,SrcBeg,SrcSize,Range,DestBeg,DestEnd):-
+    arch.pointer_size(PtSize),
+    innermost_source_object_containing_candidate(EA,PtSize,SrcBeg,SrcSize),
+    initialized_data_segment(SegmentBeg,SegmentEnd),
+    SegmentBeg <= SrcBeg,
+    SrcBeg+SrcSize > SrcBeg,
+    SrcBeg+SrcSize <= SegmentEnd,
+    EA % PtSize = 0,
+    SrcBeg % PtSize = 0,
+    SrcSize % PtSize = 0,
+    address_in_data_refined(EA,Dest),
+    data_segment(DestBeg,DestEnd),
+    DestBeg <= Dest, Dest < DestEnd,
+    // Unanchored interior targets must have pointer alignment. Packed
+    // scalar tables frequently contain misaligned address-shaped values;
+    // repeated fields alone are not evidence for those byte destinations.
+    // Symbols and independently inferred string starts are stronger anchors.
+    (
+        Dest % PtSize = 0
+        ;
+        defined_symbol(Dest,_,_,_,_,_,_,_,_)
+        ;
+        string_candidate_refined(Dest,_,_)
+    ),
+    pointer_candidate_source_range(EA,Range).
+
+.decl nullable_pointer_column_seed(EA:address,Stride:unsigned,
+                                  SrcBeg:address,SrcSize:unsigned,
+                                  Range:address,DestBeg:address,DestEnd:address)
+
+// Enumerate divisors of an OBJECT's size, not pairs of pointer candidates.
+// Dense tables can have many fields; a quadratic candidate join is avoidable.
+.decl nullable_pointer_record_stride(SrcSize:unsigned,Stride:unsigned)
+
+nullable_pointer_record_stride(SrcSize,Stride):-
+    arch.pointer_size(PtSize),
+    object_data_pointer_field(_,_,SrcSize,_,_,_),
+    Stride = range(2*PtSize,SrcSize/3+1,PtSize),
+    SrcSize % Stride = 0.
+
+nullable_pointer_column_seed(EA,Stride,SrcBeg,SrcSize,Range,DestBeg,DestEnd):-
+    arch.pointer_size(PtSize),
+    object_data_pointer_field(EA,SrcBeg,SrcSize,Range,DestBeg,DestEnd),
+    nullable_pointer_record_stride(SrcSize,Stride),
+    EA-SrcBeg < Stride,
+    EA+2*Stride+PtSize <= SrcBeg+SrcSize,
+    object_data_pointer_field(EA+Stride,SrcBeg,SrcSize,Range,DestBeg,DestEnd),
+    object_data_pointer_field(EA+2*Stride,SrcBeg,SrcSize,Range,DestBeg,DestEnd).
+
+.decl nullable_pointer_column(EA:address,Stride:unsigned,
+                             SrcBeg:address,SrcSize:unsigned,
+                             Range:address,DestBeg:address,DestEnd:address)
+
+nullable_pointer_column(EA,Stride,SrcBeg,SrcSize,Range,DestBeg,DestEnd):-
+    nullable_pointer_column_seed(EA,Stride,SrcBeg,SrcSize,Range,DestBeg,DestEnd).
+
+nullable_pointer_column(Next,Stride,SrcBeg,SrcSize,Range,DestBeg,DestEnd):-
+    arch.pointer_size(PtSize),
+    nullable_pointer_column(EA,Stride,SrcBeg,SrcSize,Range,DestBeg,DestEnd),
+    Next = EA+Stride,
+    Next > EA,
+    Next+PtSize <= SrcBeg+SrcSize,
+    (
+        object_data_pointer_field(Next,SrcBeg,SrcSize,Range,DestBeg,DestEnd)
+        ;
+        data_uword(Next,PtSize,0)
+    ).
+
+.decl nullable_pointer_column_member(EA:address,PtSize:unsigned)
+
+nullable_pointer_column_member(EA,PtSize):-
+    arch.pointer_size(PtSize),
+    nullable_pointer_column(EA,_,SrcBeg,SrcSize,Range,DestBeg,DestEnd),
+    object_data_pointer_field(EA,SrcBeg,SrcSize,Range,DestBeg,DestEnd).
+
+// A complete, aligned OBJECT made solely of data pointers and zero words is
+// another common nullable-pointer layout. Require at least three independent
+// anchors (exact target symbols or string starts), not merely three arbitrary
+// address-shaped integers. Every word must pass the layout check, and original
+// nested symbols/OBJECT ends prohibit borrowing evidence across subobjects.
+.decl anchored_pointer_object_slot(EA:address,SrcBeg:address,SrcSize:unsigned)
+
+anchored_pointer_object_slot(EA,SrcBeg,SrcSize):-
+    object_data_pointer_field(EA,SrcBeg,SrcSize,_,_,_),
+    address_in_data_refined(EA,Dest),
+    (
+        defined_symbol(Dest,_,_,_,_,_,_,_,_)
+        ;
+        string_candidate_refined(Dest,_,_)
+    ).
+
+.decl anchored_pointer_object(SrcBeg:address,SrcSize:unsigned)
+
+anchored_pointer_object(SrcBeg,SrcSize):-
+    anchored_pointer_object_slot(_,SrcBeg,SrcSize),
+    N = count : { anchored_pointer_object_slot(_,SrcBeg,SrcSize) },
+    N >= 3.
+
+.decl nonpointer_word_in_anchored_object(SrcBeg:address,SrcSize:unsigned)
+
+nonpointer_word_in_anchored_object(SrcBeg,SrcSize):-
+    anchored_pointer_object(SrcBeg,SrcSize),
+    arch.pointer_size(PtSize),
+    EA = range(SrcBeg,SrcBeg+SrcSize,PtSize),
+    data_uword(EA,PtSize,Value),
+    Value != 0,
+    !object_data_pointer_field(EA,SrcBeg,SrcSize,_,_,_).
+
+.decl original_boundary_inside_object(SrcBeg:address,SrcSize:unsigned)
+
+original_boundary_inside_object(SrcBeg,SrcSize):-
+    anchored_pointer_object(SrcBeg,SrcSize),
+    pointer_source_boundary(Boundary),
+    SrcBeg < Boundary, Boundary < SrcBeg+SrcSize.
+
+.decl complete_nullable_pointer_object_member(EA:address,PtSize:unsigned)
+
+complete_nullable_pointer_object_member(EA,PtSize):-
+    arch.pointer_size(PtSize),
+    object_data_pointer_field(EA,SrcBeg,SrcSize,_,_,_),
+    anchored_pointer_object(SrcBeg,SrcSize),
+    initialized_data_segment(Beg,End),
+    Beg <= SrcBeg, SrcBeg+SrcSize <= End,
+    !nonpointer_word_in_anchored_object(SrcBeg,SrcSize),
+    !original_boundary_inside_object(SrcBeg,SrcSize).
+
+data_object_point(EA,PtSize,"symbol",3,"bounded nullable pointer layout"):-
+    (
+        nullable_pointer_column_member(EA,PtSize)
+        ;
+        complete_nullable_pointer_object_member(EA,PtSize)
+    ),
+    // Repetition alone must not override evidence that the source bytes are
+    // used as text. The stronger existing string-pointer rules decide those
+    // collisions independently (and deliberately require more records).
+    !referenced_short_string_pointer_collision(EA,PtSize),
+    !unanchored_pointer_inside_referenced_string(EA,PtSize),
+    !unanchored_pointer_with_referenced_string_suffix(EA,PtSize).
+
 // Parser and callback tables commonly alternate a pointer to an anonymous
 // string with a pointer to the function that handles that name.  The ordinary
 // address-array heuristic cannot see the string field at a 2*pointer stride,
@@ -2063,8 +2212,9 @@ data_object_point(EA,Pt_size,"symbol",-6,
                   "zero prefix overlaps referenced string"):-
     unanchored_pointer_with_referenced_string_suffix(EA,Pt_size).
 
-data_object_point(EA,Pt_size,"symbol",-2,
-                  "short string prefix resembles address"):-
+.decl referenced_short_string_pointer_collision(EA:address,Pt_size:unsigned)
+
+referenced_short_string_pointer_collision(EA,Pt_size):-
     data_object_candidate(EA,Pt_size,"symbol"),
     EA % Pt_size = 0,
     ascii_string(EA,End),
@@ -2077,6 +2227,10 @@ data_object_point(EA,Pt_size,"symbol",-2,
     !preferred_data_access(EA,Pt_size,_),
     !preferred_data_access(EA,0,_),
     !address_array(EA,_,_).
+
+data_object_point(EA,Pt_size,"symbol",-2,
+                  "short string prefix resembles address"):-
+    referenced_short_string_pointer_collision(EA,Pt_size).
 
 // A named multiword object can begin with a pointer to an anonymous string.
 // When the target address has three printable low bytes, the stored pointer
