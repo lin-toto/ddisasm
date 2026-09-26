@@ -37,7 +37,7 @@ void X64Loader::decode(BinaryFacts& Facts, const uint8_t* Bytes, uint64_t Size, 
 
     // Build datalog instruction facts from Capstone instruction.
     std::optional<relations::Instruction> Instruction;
-    if(Count > 0)
+    if(Count > 0 && !isX64EncodingCapstone5Rejected(*CsInsn))
     {
         Instruction = build(Facts, *CsInsn);
     }

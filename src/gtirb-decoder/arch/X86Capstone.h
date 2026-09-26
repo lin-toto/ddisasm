@@ -81,4 +81,46 @@ inline void fixX86RegisterAccesses(const cs_insn& CsInstruction, std::vector<std
     }
 }
 
+// Capstone 6 decodes a few x86-64 encodings that Capstone 5.0.1 rejected. The
+// x86-64 loader reports them as invalid, so the disassembly weighs the same
+// instruction candidates as before (the loader decodes at every byte offset):
+//
+// - MOVSXD without REX.W (63 /r with a 16- or 32-bit destination). The form is
+//   valid but discouraged, compilers do not emit it, and Capstone 5.0.1
+//   treated it as invalid.
+// - A REX prefix directly before a VEX (C4/C5) or EVEX (62) prefix. The CPU
+//   raises #UD for such an instruction, but Capstone 6 decodes it.
+//
+// Measured over every byte offset of test_fuzz, libz.so and bash, these are
+// all the encodings Capstone 6 accepts and Capstone 5.0.1 rejects. (The one
+// encoding in the other direction, LOCK MOVDQU, is invalid and Capstone 6 is
+// right to reject it.)
+inline bool isX64EncodingCapstone5Rejected(const cs_insn& CsInstruction)
+{
+    if(CsInstruction.id == X86_INS_MOVSXD && (CsInstruction.detail->x86.rex & 0x08) == 0)
+    {
+        return true;
+    }
+    uint16_t I = 0;
+    auto isLegacyPrefix = [](uint8_t B) {
+        return B == 0xF0 || B == 0xF2 || B == 0xF3 || B == 0x2E || B == 0x36 || B == 0x3E
+               || B == 0x26 || B == 0x64 || B == 0x65 || B == 0x66 || B == 0x67;
+    };
+    while(I < CsInstruction.size && isLegacyPrefix(CsInstruction.bytes[I]))
+    {
+        ++I;
+    }
+    const uint16_t RexStart = I;
+    while(I < CsInstruction.size && (CsInstruction.bytes[I] & 0xF0) == 0x40)
+    {
+        ++I;
+    }
+    if(I == RexStart || I >= CsInstruction.size)
+    {
+        return false;
+    }
+    const uint8_t Next = CsInstruction.bytes[I];
+    return Next == 0xC4 || Next == 0xC5 || Next == 0x62;
+}
+
 #endif // SRC_GTIRB_DECODER_ARCH_X86CAPSTONE_H_
