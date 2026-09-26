@@ -32,9 +32,12 @@ void Arm64Loader::decode(BinaryFacts& Facts, const uint8_t* Bytes, uint64_t Size
     cs_insn* CsInsn;
     size_t Count = cs_disasm(*CsHandle, Bytes, Size, Addr, 1, &CsInsn);
 
-    // Build datalog instruction facts from Capstone instruction.
+    // Build datalog instruction facts from Capstone instruction. The adapter
+    // first rewrites Capstone 6's output into the operand shape Capstone 5.0.1
+    // reported; everything below, including loadRegisterAccesses, reads the
+    // adapted instruction.
     bool InstAdded = false;
-    if(Count > 0)
+    if(Count > 0 && capstone_compat::adaptAArch64(*CsHandle, *CsInsn))
     {
         InstAdded = build(Facts, *CsInsn);
     }
@@ -229,14 +232,10 @@ std::optional<relations::Operand> Arm64Loader::build(const cs_insn& CsInsn, uint
 {
     using namespace relations;
 
-    auto registerName = [this](unsigned int Reg) {
-        return (Reg == AARCH64_REG_INVALID) ? "NONE" : uppercase(cs_reg_name(*CsHandle, Reg));
-    };
-
     switch(CsOp.type)
     {
         case AARCH64_OP_REG:
-            return RegOp{registerName(CsOp.reg)};
+            return RegOp{registerName(CsOp.reg, CsOp.is_vreg)};
         case AARCH64_OP_IMM:
         {
             // ARM64 immediate operands do not have a size.
@@ -442,6 +441,33 @@ std::optional<const char*> barrierValue(const aarch64_db Op)
             break;
     }
     return std::nullopt;
+}
+
+std::string Arm64Loader::registerName(unsigned int Reg, bool IsVreg) const
+{
+    return capstone_compat::aarch64RegisterName(*CsHandle, Reg, IsVreg);
+}
+
+void Arm64Loader::registerAccesses(const cs_insn& CsInstruction, std::vector<std::string>& Reads,
+                                   std::vector<std::string>& Writes)
+{
+    cs_regs RegsRead, RegsWrite;
+    uint8_t RegsReadCount, RegsWriteCount;
+    if(cs_regs_access(*CsHandle, &CsInstruction, RegsRead, &RegsReadCount, RegsWrite,
+                      &RegsWriteCount)
+       != CS_ERR_OK)
+    {
+        assert(!"cs_regs_access failed");
+        return;
+    }
+    for(uint8_t i = 0; i < RegsReadCount; i++)
+    {
+        Reads.push_back(registerName(RegsRead[i]));
+    }
+    for(uint8_t i = 0; i < RegsWriteCount; i++)
+    {
+        Writes.push_back(registerName(RegsWrite[i]));
+    }
 }
 
 uint8_t Arm64Loader::operandCount(const cs_insn& CsInstruction)
