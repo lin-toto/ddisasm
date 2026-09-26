@@ -114,6 +114,24 @@ void Arm32Loader::initCsModes(const gtirb::Module& Module)
     }
 }
 
+std::shared_ptr<csh> Arm32Loader::handleForMode(size_t Mode)
+{
+    auto It = ModeHandles.find(Mode);
+    if(It != ModeHandles.end())
+    {
+        return It->second;
+    }
+    std::shared_ptr<csh> Handle(new csh(0), [](csh* H) {
+        cs_close(H);
+        delete H;
+    });
+    [[maybe_unused]] cs_err Err = cs_open(CS_ARCH_ARM, static_cast<cs_mode>(Mode), Handle.get());
+    assert(Err == CS_ERR_OK && "Failed to initialize ARM disassembler.");
+    cs_option(*Handle, CS_OPT_DETAIL, CS_OPT_ON);
+    ModeHandles.emplace(Mode, Handle);
+    return Handle;
+}
+
 void Arm32Loader::load(const gtirb::Module& Module, const gtirb::ByteInterval& ByteInterval,
                        BinaryFacts& Facts)
 {
@@ -165,7 +183,9 @@ void Arm32Loader::decode(BinaryFacts& Facts, const uint8_t* Bytes, uint64_t Size
     std::unique_ptr<cs_insn, std::function<void(cs_insn*)>> Insn;
     for(size_t CsMode : CsModes)
     {
-        cs_option(*CsHandle, CS_OPT_MODE, CsMode);
+        // The handle that decoded the instruction also serves
+        // loadRegisterAccesses and the register names.
+        CsHandle = handleForMode(CsMode);
         cs_insn* TmpInsnRaw = nullptr;
         size_t Count = cs_disasm(*CsHandle, Bytes, Size, Addr, 1, &TmpInsnRaw);
         Success = Count > 0;

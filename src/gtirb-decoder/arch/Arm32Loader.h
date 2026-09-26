@@ -26,6 +26,7 @@
 #include <capstone/capstone.h>
 
 #include <map>
+#include <memory>
 #include <string>
 
 #include "../Relations.h"
@@ -87,7 +88,13 @@ private:
     void build(BinaryFacts& Facts, const cs_insn& CsInstruction, const OpndFactsT& OpFacts);
     bool collectOpndFacts(OpndFactsT& OpndFacts, const cs_insn& CsInstruction);
 
+    // Capstone 6 ORs CS_OPT_MODE into an ARM handle's mode instead of replacing
+    // it, so one handle cannot be switched back from Thumb to ARM. Each decode
+    // mode gets its own handle, opened on first use.
+    std::shared_ptr<csh> handleForMode(size_t Mode);
+
     std::map<size_t, std::vector<size_t>> CsModes;
+    std::map<size_t, std::shared_ptr<csh>> ModeHandles;
 };
 
 #endif // SRC_GTIRB_DECODER_ARCH_ARM32DECODER_H_
