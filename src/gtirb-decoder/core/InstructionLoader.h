@@ -25,6 +25,10 @@
 #include <capstone/capstone.h>
 #include <souffle/SouffleInterface.h>
 
+#if CS_API_MAJOR < 6
+#error "ddisasm requires Capstone 6 (6.0.0-Alpha11)"
+#endif
+
 #include <gtirb/gtirb.hpp>
 #include <vector>
 

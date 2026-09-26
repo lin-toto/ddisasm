@@ -25,6 +25,7 @@
 
 #include <capstone/capstone.h>
 
+#include <gtirb_pprinter/CapstoneCompat.hpp>
 #include <map>
 #include <string>
 
@@ -37,7 +38,7 @@ public:
     Arm64Loader() : InstructionLoader(4)
     {
         // Setup Capstone engine.
-        [[maybe_unused]] cs_err Err = cs_open(CS_ARCH_ARM64, CS_MODE_ARM, CsHandle.get());
+        [[maybe_unused]] cs_err Err = cs_open(CS_ARCH_AARCH64, CS_MODE_ARM, CsHandle.get());
         assert(Err == CS_ERR_OK && "Failed to initialize ARM64 disassembler.");
         cs_option(*CsHandle, CS_OPT_DETAIL, CS_OPT_ON);
     }
@@ -49,12 +50,12 @@ protected:
 
 private:
     std::optional<relations::Operand> build(const cs_insn& CsInsn, uint8_t OpIndex,
-                                            const cs_arm64_op& CsOp);
+                                            const cs_aarch64_op& CsOp);
     bool build(BinaryFacts& Facts, const cs_insn& CsInstruction);
     std::optional<std::string> operandString(const cs_insn& CsInsn, uint8_t Index);
 };
 
-std::optional<const char*> barrierValue(const arm64_barrier_op Op);
-std::optional<const char*> prefetchValue(const arm64_prefetch_op Op);
+std::optional<const char*> barrierValue(const aarch64_db Op);
+std::optional<const char*> prefetchValue(const aarch64_prfm Op);
 
 #endif // SRC_GTIRB_DECODER_ARCH_ARM64DECODER_H_

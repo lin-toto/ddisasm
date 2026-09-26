@@ -98,8 +98,7 @@ std::optional<relations::Instruction> RiscVLoader::build(BinaryFacts& Facts,
     std::vector<uint64_t> OpCodes;
 
     if((Name == "JAL" || Name == "JALR") && Details.op_count > 0
-       && Details.operands[0].type == RISCV_OP_REG
-       && Details.operands[0].reg == RISCV_REG_ZERO)
+       && Details.operands[0].type == RISCV_OP_REG && Details.operands[0].reg == RISCV_REG_X0)
     {
         Name = (Name == "JAL") ? "J" : "JR";
     }

@@ -38,9 +38,9 @@ public:
         : InstructionLoader{2},
           PointerSize{static_cast<uint8_t>(XLen0 == XLen::RV32 ? 4 : 8)}
     {
-        // Setup Capstone engine. CS_MODE_RISCVC enables 16-bit compressed instructions.
+        // Setup Capstone engine. CS_MODE_RISCV_C enables 16-bit compressed instructions.
         unsigned int Mode0 = (XLen0 == XLen::RV32) ? CS_MODE_RISCV32 : CS_MODE_RISCV64;
-        Mode0 |= CS_MODE_RISCVC;
+        Mode0 |= CS_MODE_RISCV_C;
 
         cs_mode Mode = (cs_mode)Mode0;
         [[maybe_unused]] cs_err Err = cs_open(CS_ARCH_RISCV, Mode, CsHandle.get());

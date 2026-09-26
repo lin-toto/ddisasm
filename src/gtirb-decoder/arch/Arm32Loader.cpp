@@ -205,56 +205,57 @@ void Arm32Loader::decode(BinaryFacts& Facts, const uint8_t* Bytes, uint64_t Size
     }
 }
 
-static std::string armCc2String(arm_cc CC)
+static std::string armCc2String(ARMCC_CondCodes CC)
 {
     std::string OpCC = "";
     switch(CC)
     {
-        case ARM_CC_INVALID:
+        case ARMCC_UNDEF:
+        case ARMCC_Invalid:
             assert(!"Unexpected condition code for IT instruction");
-        case ARM_CC_EQ:
+        case ARMCC_EQ:
             OpCC = "EQ";
             break;
-        case ARM_CC_NE:
+        case ARMCC_NE:
             OpCC = "NE";
             break;
-        case ARM_CC_HS:
+        case ARMCC_HS:
             OpCC = "HS";
             break;
-        case ARM_CC_LO:
+        case ARMCC_LO:
             OpCC = "LO";
             break;
-        case ARM_CC_MI:
+        case ARMCC_MI:
             OpCC = "MI";
             break;
-        case ARM_CC_PL:
+        case ARMCC_PL:
             OpCC = "PL";
             break;
-        case ARM_CC_VS:
+        case ARMCC_VS:
             OpCC = "VS";
             break;
-        case ARM_CC_VC:
+        case ARMCC_VC:
             OpCC = "VC";
             break;
-        case ARM_CC_HI:
+        case ARMCC_HI:
             OpCC = "HI";
             break;
-        case ARM_CC_LS:
+        case ARMCC_LS:
             OpCC = "LS";
             break;
-        case ARM_CC_GE:
+        case ARMCC_GE:
             OpCC = "GE";
             break;
-        case ARM_CC_LT:
+        case ARMCC_LT:
             OpCC = "LT";
             break;
-        case ARM_CC_GT:
+        case ARMCC_GT:
             OpCC = "GT";
             break;
-        case ARM_CC_LE:
+        case ARMCC_LE:
             OpCC = "LE";
             break;
-        case ARM_CC_AL:
+        case ARMCC_AL:
             OpCC = "AL";
             break;
     }
@@ -280,16 +281,24 @@ bool Arm32Loader::collectOpndFacts(OpndFactsT& OpndFacts, const cs_insn& CsInst)
         ARM_INS_STM,     ARM_INS_STMDA,   ARM_INS_STMDB,  ARM_INS_STMIB,
         ARM_INS_FSTMDBX, ARM_INS_FSTMIAX, ARM_INS_VSTMDB, ARM_INS_VSTMIA};
 
-    static std::set<arm_insn> PushPop = {ARM_INS_POP, ARM_INS_PUSH, ARM_INS_VPOP, ARM_INS_VPUSH};
+    // Capstone 6 reports VPOP/VPUSH (and PUSH/POP in ARM mode) as aliases of
+    // the load/store-multiple instructions.
+    static std::set<arm_insn> PushPop = {ARM_INS_POP,        ARM_INS_PUSH,
+                                         ARM_INS_ALIAS_POP,  ARM_INS_ALIAS_PUSH,
+                                         ARM_INS_ALIAS_VPOP, ARM_INS_ALIAS_VPUSH};
 
     static std::set<arm_insn> VldVst = {ARM_INS_VLD1, ARM_INS_VLD2, ARM_INS_VLD3, ARM_INS_VLD4,
                                         ARM_INS_VST1, ARM_INS_VST2, ARM_INS_VST3, ARM_INS_VST4};
 
     auto regBitFieldInitialIndex = [](const cs_insn& Inst) {
+        const bool IsPushPop =
+            PushPop.find(static_cast<arm_insn>(Inst.id)) != PushPop.end()
+            || (Inst.is_alias
+                && PushPop.find(static_cast<arm_insn>(Inst.alias_id)) != PushPop.end());
         int RegBitVectorIndex = -1;
-        if(LdmStm.find(static_cast<arm_insn>(Inst.id)) != LdmStm.end())
+        if(LdmStm.find(static_cast<arm_insn>(Inst.id)) != LdmStm.end() && !IsPushPop)
             RegBitVectorIndex = 1;
-        if(PushPop.find(static_cast<arm_insn>(Inst.id)) != PushPop.end())
+        if(IsPushPop)
             RegBitVectorIndex = 0;
         if(VldVst.find(static_cast<arm_insn>(Inst.id)) != VldVst.end())
             RegBitVectorIndex = 0;
@@ -390,11 +399,14 @@ bool Arm32Loader::collectOpndFacts(OpndFactsT& OpndFacts, const cs_insn& CsInst)
                     case ARM_SFT_ROR:
                         ShiftType = "ROR";
                         break;
-                    case ARM_SFT_RRX_REG:
-                        IsRegShift = true;
                     case ARM_SFT_RRX:
                         ShiftType = "RRX";
                         break;
+                    case ARM_SFT_UXTW:
+                    case ARM_SFT_REG:
+                        std::cerr << "WARNING: instruction has an unsupported shift at " << Addr
+                                  << "\n";
+                        return false;
                     case ARM_SFT_INVALID:
                         std::cerr << "WARNING: instruction has a non-zero invalid shift at " << Addr
                                   << "\n";
@@ -446,12 +458,12 @@ void Arm32Loader::build(BinaryFacts& Facts, const cs_insn& CsInstruction,
 
     Facts.Instructions.add(relations::Instruction{Addr, Size, "", Name, OpCodes, 0, 0});
 
-    if(Details.cc != ARM_CC_AL)
+    if(Details.cc != ARMCC_AL)
     {
         Facts.Instructions.conditionCode(
             relations::InstructionCondCode{Addr, armCc2String(Details.cc)});
     }
-    if(Details.writeback)
+    if(CsInstruction.detail->writeback)
     {
         Facts.Instructions.writeback(relations::InstructionWriteback{Addr});
     }
@@ -521,7 +533,11 @@ std::optional<relations::Operand> Arm32Loader::build(const cs_insn& CsInsn, cons
             relations::ImmOp I = {CsOp.imm, 4};
             return I;
         }
-        case ARM_OP_SYSREG: ///< MSR/MRS special register operand
+        case ARM_OP_SYSREG:    ///< MSR/MRS special register operand
+        case ARM_OP_BANKEDREG: ///< Capstone 6 splits the special registers
+        case ARM_OP_SPSR:      ///< of MSR/MRS into these kinds.
+        case ARM_OP_CPSR:
+        case ARM_OP_SYSM:
             return RegOp{"MSR"};
         case ARM_OP_FP:
             return FPImmOp{CsOp.fp};

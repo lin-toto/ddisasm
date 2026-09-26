@@ -54,7 +54,7 @@ void Arm64Loader::decode(BinaryFacts& Facts, const uint8_t* Bytes, uint64_t Size
 
 bool Arm64Loader::build(BinaryFacts& Facts, const cs_insn& CsInstruction)
 {
-    const cs_arm64& Details = CsInstruction.detail->arm64;
+    const cs_aarch64& Details = CsInstruction.detail->aarch64;
     std::string Name = uppercase(CsInstruction.mnemonic);
     gtirb::Addr Addr(CsInstruction.address);
     std::vector<uint64_t> OpCodes;
@@ -65,16 +65,17 @@ bool Arm64Loader::build(BinaryFacts& Facts, const cs_insn& CsInstruction)
     // "MOVZ X0, #0x40, LSL #16"
     // becomes
     // "MOV X0, #0x400000")
-    // The mnemonic and instruction id are both reported as MOV, so recover
-    // the canonical MOVZ form by checking the raw instruction encoding
+    // The mnemonic is MOV (and Capstone 6 reports the alias as MOV), so
+    // recover the canonical MOVZ form by checking the raw instruction encoding
     // (opc == 10) and reconstructing the original imm16 + shift pair.
     // This allows the MOVZ+MOVK symbolization rules to match correctly.
     unsigned AliasedShift = 0;
     int64_t AliasedImm16 = 0;
-    if(CsInstruction.id == ARM64_INS_MOV && Details.op_count == 2)
+    if(CsInstruction.is_alias && CsInstruction.alias_id == AARCH64_INS_ALIAS_MOV
+       && Details.op_count == 2)
     {
-        const cs_arm64_op& Src = Details.operands[1];
-        if(Src.type == ARM64_OP_IMM)
+        const cs_aarch64_op& Src = Details.operands[1];
+        if(Src.type == AARCH64_OP_IMM)
         {
             uint32_t Enc = static_cast<uint32_t>(CsInstruction.bytes[0])
                            | (static_cast<uint32_t>(CsInstruction.bytes[1]) << 8)
@@ -98,13 +99,13 @@ bool Arm64Loader::build(BinaryFacts& Facts, const cs_insn& CsInstruction)
         for(uint8_t i = 0; i < OpCount; i++)
         {
             // Load capstone operand.
-            cs_arm64_op CsOp = Details.operands[i];
+            cs_aarch64_op CsOp = Details.operands[i];
             // For aliased MOVZ, we fix up the immediate operand to recover the
             // original 16-bit value and shift that capstone folded away.
-            if(CsOp.type == ARM64_OP_IMM && AliasedShift > 0)
+            if(CsOp.type == AARCH64_OP_IMM && AliasedShift > 0)
             {
                 CsOp.imm = AliasedImm16;
-                CsOp.shift.type = ARM64_SFT_LSL;
+                CsOp.shift.type = AARCH64_SFT_LSL;
                 CsOp.shift.value = AliasedShift;
             }
 
@@ -122,7 +123,7 @@ bool Arm64Loader::build(BinaryFacts& Facts, const cs_insn& CsInstruction)
             // Populate shift metadata for immediate operands (e.g., MOVZ/MOVK
             // with lsl #16/#32/#48). This is needed for MOVZ+MOVK address
             // reconstruction in the Datalog symbolization rules.
-            if(CsOp.type == ARM64_OP_IMM && CsOp.shift.type == ARM64_SFT_LSL)
+            if(CsOp.type == AARCH64_OP_IMM && CsOp.shift.type == AARCH64_SFT_LSL)
             {
                 Facts.Instructions.shiftedOp(
                     relations::ShiftedOp{Addr, rotated_op_index(i + 1, OpCount),
@@ -130,28 +131,34 @@ bool Arm64Loader::build(BinaryFacts& Facts, const cs_insn& CsInstruction)
             }
 
             // Populate shift metadata if present.
-            if(CsOp.type == ARM64_OP_REG && CsOp.shift.value != 0)
+            if(CsOp.type == AARCH64_OP_REG && CsOp.shift.value != 0)
             {
                 std::string ShiftType;
                 switch(CsOp.shift.type)
                 {
-                    case ARM64_SFT_LSL:
+                    case AARCH64_SFT_LSL:
                         ShiftType = "LSL";
                         break;
-                    case ARM64_SFT_MSL:
+                    case AARCH64_SFT_MSL:
                         ShiftType = "MSL";
                         break;
-                    case ARM64_SFT_LSR:
+                    case AARCH64_SFT_LSR:
                         ShiftType = "LSR";
                         break;
-                    case ARM64_SFT_ASR:
+                    case AARCH64_SFT_ASR:
                         ShiftType = "ASR";
                         break;
-                    case ARM64_SFT_ROR:
+                    case AARCH64_SFT_ROR:
                         ShiftType = "ROR";
                         break;
-                    case ARM64_SFT_INVALID:
+                    case AARCH64_SFT_INVALID:
                         std::cerr << "WARNING: instruction has a non-zero invalid shift at " << Addr
+                                  << "\n";
+                        return false;
+                    default:
+                        // Shifts by a register (AARCH64_SFT_*_REG) have no
+                        // op_shifted representation.
+                        std::cerr << "WARNING: instruction has an unsupported shift at " << Addr
                                   << "\n";
                         return false;
                 }
@@ -161,36 +168,36 @@ bool Arm64Loader::build(BinaryFacts& Facts, const cs_insn& CsInstruction)
             }
 
             // Populate extend metadata if present. We pass this as a shift type.
-            if(CsOp.type == ARM64_OP_REG && CsOp.ext != ARM64_EXT_INVALID)
+            if(CsOp.type == AARCH64_OP_REG && CsOp.ext != AARCH64_EXT_INVALID)
             {
                 std::string ShiftType;
                 switch(CsOp.ext)
                 {
-                    case ARM64_EXT_UXTB:
+                    case AARCH64_EXT_UXTB:
                         ShiftType = "UXTB";
                         break;
-                    case ARM64_EXT_UXTH:
+                    case AARCH64_EXT_UXTH:
                         ShiftType = "UXTH";
                         break;
-                    case ARM64_EXT_UXTW:
+                    case AARCH64_EXT_UXTW:
                         ShiftType = "UXTW";
                         break;
-                    case ARM64_EXT_UXTX:
+                    case AARCH64_EXT_UXTX:
                         ShiftType = "UXTX";
                         break;
-                    case ARM64_EXT_SXTB:
+                    case AARCH64_EXT_SXTB:
                         ShiftType = "SXTB";
                         break;
-                    case ARM64_EXT_SXTH:
+                    case AARCH64_EXT_SXTH:
                         ShiftType = "SXTH";
                         break;
-                    case ARM64_EXT_SXTW:
+                    case AARCH64_EXT_SXTW:
                         ShiftType = "SXTW";
                         break;
-                    case ARM64_EXT_SXTX:
+                    case AARCH64_EXT_SXTX:
                         ShiftType = "SXTX";
                         break;
-                    case ARM64_EXT_INVALID:
+                    case AARCH64_EXT_INVALID:
                         std::cerr << "WARNING: instruction has a non-zero invalid shift at " << Addr
                                   << "\n";
                         return false;
@@ -210,7 +217,7 @@ bool Arm64Loader::build(BinaryFacts& Facts, const cs_insn& CsInstruction)
     uint64_t Size(CsInstruction.size);
 
     Facts.Instructions.add(relations::Instruction{Addr, Size, "", Name, OpCodes, 0, 0});
-    if(Details.writeback)
+    if(CsInstruction.detail->writeback)
     {
         Facts.Instructions.writeback(relations::InstructionWriteback{Addr});
     }
@@ -218,32 +225,32 @@ bool Arm64Loader::build(BinaryFacts& Facts, const cs_insn& CsInstruction)
 }
 
 std::optional<relations::Operand> Arm64Loader::build(const cs_insn& CsInsn, uint8_t OpIndex,
-                                                     const cs_arm64_op& CsOp)
+                                                     const cs_aarch64_op& CsOp)
 {
     using namespace relations;
 
     auto registerName = [this](unsigned int Reg) {
-        return (Reg == ARM_REG_INVALID) ? "NONE" : uppercase(cs_reg_name(*CsHandle, Reg));
+        return (Reg == AARCH64_REG_INVALID) ? "NONE" : uppercase(cs_reg_name(*CsHandle, Reg));
     };
 
     switch(CsOp.type)
     {
-        case ARM64_OP_REG:
+        case AARCH64_OP_REG:
             return RegOp{registerName(CsOp.reg)};
-        case ARM64_OP_IMM:
+        case AARCH64_OP_IMM:
         {
             // ARM64 immediate operands do not have a size.
             relations::ImmOp I = {CsOp.imm, 8};
             return I;
         }
-        case ARM64_OP_MEM:
+        case AARCH64_OP_MEM:
         {
             int64_t Mult = 1;
 
             if(CsOp.shift.value != 0)
             {
                 // In load and store operations, the only type of shift allowed is LSL.
-                if(CsOp.shift.type == ARM64_SFT_LSL)
+                if(CsOp.shift.type == AARCH64_SFT_LSL)
                 {
                     Mult = 1 << CsOp.shift.value;
                 }
@@ -253,7 +260,7 @@ std::optional<relations::Operand> Arm64Loader::build(const cs_insn& CsInsn, uint
                 }
             }
 
-            IndirectOp I = {registerName(ARM64_REG_INVALID),
+            IndirectOp I = {registerName(AARCH64_REG_INVALID),
                             registerName(CsOp.mem.base),
                             registerName(CsOp.mem.index),
                             Mult,
@@ -261,55 +268,62 @@ std::optional<relations::Operand> Arm64Loader::build(const cs_insn& CsInsn, uint
                             4};
             return I;
         }
-        case ARM64_OP_FP:
+        case AARCH64_OP_FP:
             return FPImmOp{CsOp.fp};
-        case ARM64_OP_CIMM:
+        case AARCH64_OP_CIMM:
             std::cerr << "WARNING: unsupported CIMM operand\n";
             break;
-        case ARM64_OP_PSTATE:
+        case AARCH64_OP_REG_MRS:
+        case AARCH64_OP_REG_MSR:
+        case AARCH64_OP_SYSREG:
+        case AARCH64_OP_SYSALIAS:
         {
-            std::optional<std::string> OpString = operandString(CsInsn, OpIndex);
-            if(OpString)
+            // Capstone 6 reports system registers, PSTATE fields, barrier
+            // options and prefetch operations as system operands.
+            if(CsOp.type == AARCH64_OP_SYSALIAS && CsOp.sysop.sub_type == AARCH64_OP_PRFM)
             {
-                return SpecialOp{"pstate", *OpString};
+                if(std::optional<const char*> Label = prefetchValue(CsOp.sysop.alias.prfm))
+                {
+                    return SpecialOp{"prefetch", *Label};
+                }
+                break;
+            }
+            switch(capstone_compat::aarch64SystemOperandKind(CsOp))
+            {
+                case capstone_compat::Aarch64SystemOperand::Pstate:
+                {
+                    std::optional<std::string> OpString = operandString(CsInsn, OpIndex);
+                    if(OpString)
+                    {
+                        return SpecialOp{"pstate", *OpString};
+                    }
+                    break;
+                }
+                case capstone_compat::Aarch64SystemOperand::Barrier:
+                {
+                    if(std::optional<const char*> Label = barrierValue(CsOp.sysop.alias.db))
+                    {
+                        return SpecialOp{"barrier", *Label};
+                    }
+                    break;
+                }
+                case capstone_compat::Aarch64SystemOperand::Register:
+                case capstone_compat::Aarch64SystemOperand::None:
+                {
+                    // It seems like capstone only has a subset of system registers
+                    // implemented for printing with cs_reg_name, so we have to parse
+                    // it from the instruction string.
+                    std::optional<std::string> Reg = operandString(CsInsn, OpIndex);
+                    if(Reg)
+                    {
+                        return RegOp{*Reg};
+                    }
+                    break;
+                }
             }
             break;
         }
-        case ARM64_OP_REG_MRS:
-        case ARM64_OP_REG_MSR:
-            // Using capstone 4.x, MRS / MSR instructions produce operand
-            // types of the same name, but with capstone 5.x (next / GrammaTech
-            // fork), they appear as SYS operands.
-            // Fallthrough to SYS so that they are handled the same.
-        case ARM64_OP_SYS:
-        {
-            // It seems like capstone only has a subset of system registers
-            // implemented for printing with cs_reg_name, so we have to parse
-            // it from the instruction string.
-            std::optional<std::string> Reg = operandString(CsInsn, OpIndex);
-            if(Reg)
-            {
-                return RegOp{*Reg};
-            }
-            break;
-        }
-        case ARM64_OP_PREFETCH:
-        {
-            if(std::optional<const char*> Label = prefetchValue(CsOp.prefetch))
-            {
-                return SpecialOp{"prefetch", *Label};
-            }
-            break;
-        }
-        case ARM64_OP_BARRIER:
-        {
-            if(std::optional<const char*> Label = barrierValue(CsOp.barrier))
-            {
-                return SpecialOp{"barrier", *Label};
-            }
-            break;
-        }
-        case ARM64_OP_INVALID:
+        case AARCH64_OP_INVALID:
         default:
             break;
     }
@@ -350,82 +364,80 @@ std::optional<std::string> Arm64Loader::operandString(const cs_insn& CsInsn, uin
     return uppercase(std::string(Start, Size));
 }
 
-std::optional<const char*> prefetchValue(const arm64_prefetch_op Op)
+std::optional<const char*> prefetchValue(const aarch64_prfm Op)
 {
     switch(Op)
     {
-        case ARM64_PRFM_PLDL1KEEP:
+        case AARCH64_PRFM_PLDL1KEEP:
             return "pldl1keep";
-        case ARM64_PRFM_PLDL1STRM:
+        case AARCH64_PRFM_PLDL1STRM:
             return "pldl1strm";
-        case ARM64_PRFM_PLDL2KEEP:
+        case AARCH64_PRFM_PLDL2KEEP:
             return "pldl2keep";
-        case ARM64_PRFM_PLDL2STRM:
+        case AARCH64_PRFM_PLDL2STRM:
             return "pldl2strm";
-        case ARM64_PRFM_PLDL3KEEP:
+        case AARCH64_PRFM_PLDL3KEEP:
             return "pldl3keep";
-        case ARM64_PRFM_PLDL3STRM:
+        case AARCH64_PRFM_PLDL3STRM:
             return "pldl3strm";
-        case ARM64_PRFM_PLIL1KEEP:
+        case AARCH64_PRFM_PLIL1KEEP:
             return "plil1keep";
-        case ARM64_PRFM_PLIL1STRM:
+        case AARCH64_PRFM_PLIL1STRM:
             return "plil1strm";
-        case ARM64_PRFM_PLIL2KEEP:
+        case AARCH64_PRFM_PLIL2KEEP:
             return "plil2keep";
-        case ARM64_PRFM_PLIL2STRM:
+        case AARCH64_PRFM_PLIL2STRM:
             return "plil2strm";
-        case ARM64_PRFM_PLIL3KEEP:
+        case AARCH64_PRFM_PLIL3KEEP:
             return "plil3keep";
-        case ARM64_PRFM_PLIL3STRM:
+        case AARCH64_PRFM_PLIL3STRM:
             return "plil3strm";
-        case ARM64_PRFM_PSTL1KEEP:
+        case AARCH64_PRFM_PSTL1KEEP:
             return "pstl1keep";
-        case ARM64_PRFM_PSTL1STRM:
+        case AARCH64_PRFM_PSTL1STRM:
             return "pstl1strm";
-        case ARM64_PRFM_PSTL2KEEP:
+        case AARCH64_PRFM_PSTL2KEEP:
             return "pstl2keep";
-        case ARM64_PRFM_PSTL2STRM:
+        case AARCH64_PRFM_PSTL2STRM:
             return "pstl2strm";
-        case ARM64_PRFM_PSTL3KEEP:
+        case AARCH64_PRFM_PSTL3KEEP:
             return "pstl3keep";
-        case ARM64_PRFM_PSTL3STRM:
+        case AARCH64_PRFM_PSTL3STRM:
             return "pstl3strm";
-        case ARM64_PRFM_INVALID:
         default:
             break;
     }
     return std::nullopt;
 }
 
-std::optional<const char*> barrierValue(const arm64_barrier_op Op)
+std::optional<const char*> barrierValue(const aarch64_db Op)
 {
     switch(Op)
     {
-        case ARM64_BARRIER_OSHLD:
+        case AARCH64_DB_OSHLD:
             return "oshld";
-        case ARM64_BARRIER_OSHST:
+        case AARCH64_DB_OSHST:
             return "oshst";
-        case ARM64_BARRIER_OSH:
+        case AARCH64_DB_OSH:
             return "osh";
-        case ARM64_BARRIER_NSHLD:
+        case AARCH64_DB_NSHLD:
             return "nshld";
-        case ARM64_BARRIER_NSHST:
+        case AARCH64_DB_NSHST:
             return "nshst";
-        case ARM64_BARRIER_NSH:
+        case AARCH64_DB_NSH:
             return "nsh";
-        case ARM64_BARRIER_ISHLD:
+        case AARCH64_DB_ISHLD:
             return "ishld";
-        case ARM64_BARRIER_ISHST:
+        case AARCH64_DB_ISHST:
             return "ishst";
-        case ARM64_BARRIER_ISH:
+        case AARCH64_DB_ISH:
             return "ish";
-        case ARM64_BARRIER_LD:
+        case AARCH64_DB_LD:
             return "ld";
-        case ARM64_BARRIER_ST:
+        case AARCH64_DB_ST:
             return "st";
-        case ARM64_BARRIER_SY:
+        case AARCH64_DB_SY:
             return "sy";
-        case ARM64_BARRIER_INVALID:
         default:
             break;
     }
@@ -434,13 +446,13 @@ std::optional<const char*> barrierValue(const arm64_barrier_op Op)
 
 uint8_t Arm64Loader::operandCount(const cs_insn& CsInstruction)
 {
-    const cs_arm64& Details = CsInstruction.detail->arm64;
+    const cs_aarch64& Details = CsInstruction.detail->aarch64;
     return Details.op_count;
 }
 
 uint8_t Arm64Loader::operandAccess(const cs_insn& CsInstruction, uint64_t Index)
 {
-    const cs_arm64& Details = CsInstruction.detail->arm64;
-    const cs_arm64_op& op = Details.operands[Index];
+    const cs_aarch64& Details = CsInstruction.detail->aarch64;
+    const cs_aarch64_op& op = Details.operands[Index];
     return op.access;
 }
