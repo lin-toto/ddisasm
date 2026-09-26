@@ -65,10 +65,13 @@ uint64_t RiscVLoader::decodeInstruction(BinaryFacts& Facts, const uint8_t* Bytes
     cs_insn* CsInsn;
     size_t Count = cs_disasm(*CsHandle, Bytes, Size, Addr, 1, &CsInsn);
 
-    // Build datalog instruction facts from Capstone instruction.
+    // Build datalog instruction facts from Capstone instruction. The adapter
+    // rewrites Capstone 6's output into the shape Capstone 5.0.1 produced and
+    // rejects what Capstone 5.0.1 did not decode, which is then treated as a
+    // failed decode.
     std::optional<relations::Instruction> Instruction;
     uint64_t InstructionSize = MinInstructionSize;
-    if(Count > 0)
+    if(Count > 0 && capstone_compat::adaptRiscv(*CsHandle, *CsInsn))
     {
         Instruction = build(Facts, *CsInsn);
         InstructionSize = CsInsn->size;

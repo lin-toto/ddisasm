@@ -19,6 +19,7 @@
 
 #include <capstone/capstone.h>
 
+#include <gtirb_pprinter/CapstoneCompat.hpp>
 #include <optional>
 #include <string>
 
@@ -38,14 +39,12 @@ public:
         : InstructionLoader{2},
           PointerSize{static_cast<uint8_t>(XLen0 == XLen::RV32 ? 4 : 8)}
     {
-        // Setup Capstone engine. CS_MODE_RISCV_C enables 16-bit compressed instructions.
-        unsigned int Mode0 = (XLen0 == XLen::RV32) ? CS_MODE_RISCV32 : CS_MODE_RISCV64;
-        Mode0 |= CS_MODE_RISCV_C;
-
-        cs_mode Mode = (cs_mode)Mode0;
-        [[maybe_unused]] cs_err Err = cs_open(CS_ARCH_RISCV, Mode, CsHandle.get());
+        // Setup Capstone engine: RV32GC or RV64GC with real (non-alias)
+        // syntax and details, the configuration capstone_compat::adaptRiscv
+        // expects (gtirb-pprinter uses the same one).
+        [[maybe_unused]] cs_err Err =
+            capstone_compat::openRiscv(XLen0 == XLen::RV64, false, CsHandle.get());
         assert(Err == CS_ERR_OK && "Failed to initialize RISC-V disassembler.");
-        cs_option(*CsHandle, CS_OPT_DETAIL, CS_OPT_ON);
     }
 
 protected:
