@@ -41,6 +41,7 @@
 #include <boost/filesystem.hpp>
 #include <boost/program_options.hpp>
 #include <gtirb/gtirb.hpp>
+#include <gtirb_pprinter/CapstoneCompat.hpp>
 #include <gtirb_pprinter/Fixup.hpp>
 #include <gtirb_pprinter/PeBinaryPrinter.hpp>
 #include <gtirb_pprinter/PrettyPrinter.hpp>
@@ -125,6 +126,13 @@ static void checkOutputParamIsWritable(const po::variables_map &Vars, const std:
 
 int main(int argc, char **argv)
 {
+    int CapstoneMajor = 0, CapstoneMinor = 0;
+    if(!capstone_compat::loadedCapstoneMatchesHeaders(&CapstoneMajor, &CapstoneMinor))
+    {
+        std::cerr << "ERROR: ddisasm was built for Capstone " << CS_API_MAJOR << "." << CS_API_MINOR
+                  << " but loaded Capstone " << CapstoneMajor << "." << CapstoneMinor << "\n";
+        return EXIT_FAILURE;
+    }
     registerAuxDataTypes();
     registerDatalogLoaders();
     gtirb_pprint::registerPrettyPrinters();
