@@ -26,6 +26,8 @@
 #include <string>
 #include <vector>
 
+#include "Arm64Capstone.h"
+
 void Arm64Loader::decode(BinaryFacts& Facts, const uint8_t* Bytes, uint64_t Size, uint64_t Addr)
 {
     // Decode instruction with Capstone.
@@ -34,11 +36,12 @@ void Arm64Loader::decode(BinaryFacts& Facts, const uint8_t* Bytes, uint64_t Size
 
     // Build datalog instruction facts from Capstone instruction. The adapter
     // first rewrites Capstone 6's output into the operand shape Capstone 5.0.1
-    // reported; everything below, including loadRegisterAccesses, reads the
-    // adapted instruction.
+    // reported, and emulateCapstone5Access its register accesses; everything
+    // below, including loadRegisterAccesses, reads the adapted instruction.
     bool InstAdded = false;
     if(Count > 0 && capstone_compat::adaptAArch64(*CsHandle, *CsInsn))
     {
+        emulateCapstone5Access(*CsInsn);
         InstAdded = build(Facts, *CsInsn);
     }
 
@@ -453,20 +456,33 @@ void Arm64Loader::registerAccesses(const cs_insn& CsInstruction, std::vector<std
 {
     cs_regs RegsRead, RegsWrite;
     uint8_t RegsReadCount, RegsWriteCount;
-    if(cs_regs_access(*CsHandle, &CsInstruction, RegsRead, &RegsReadCount, RegsWrite,
-                      &RegsWriteCount)
+    if(capstone5RegsAccess(*CsHandle, CsInstruction, RegsRead, &RegsReadCount, RegsWrite,
+                           &RegsWriteCount)
        != CS_ERR_OK)
     {
         assert(!"cs_regs_access failed");
         return;
     }
+    // Capstone 5.0.1 named a register that is a vector operand V<n> here too.
+    const cs_aarch64& Details = CsInstruction.detail->aarch64;
+    auto isVreg = [&Details](uint16_t Reg) {
+        for(uint8_t i = 0; i < Details.op_count; i++)
+        {
+            const cs_aarch64_op& Op = Details.operands[i];
+            if(Op.type == AARCH64_OP_REG && Op.reg == Reg && Op.is_vreg)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
     for(uint8_t i = 0; i < RegsReadCount; i++)
     {
-        Reads.push_back(registerName(RegsRead[i]));
+        Reads.push_back(registerName(RegsRead[i], isVreg(RegsRead[i])));
     }
     for(uint8_t i = 0; i < RegsWriteCount; i++)
     {
-        Writes.push_back(registerName(RegsWrite[i]));
+        Writes.push_back(registerName(RegsWrite[i], isVreg(RegsWrite[i])));
     }
 }
 
