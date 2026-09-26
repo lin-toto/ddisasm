@@ -766,29 +766,33 @@ address_array_aux(EA,Diff,"code",EA):-
 
 
 address_array_aux(EA,Diff,"data",EA):-
-    address_in_data_refined(EA,Dest1),data_byte(Dest1,_),
+    address_in_data_refined(EA,Dest1),
     arch.pointer_size(Pt_size),
     EA % Pt_size = 0,
     next_address_in_data(EA,EA_next),
     Diff = EA_next-EA,
     data_segment(Begin,End),
-    Begin <= Dest1, Dest1 <= End,
+    // A data pointer may target uninitialized storage.  Requiring data_byte
+    // at the destination incorrectly excludes .bss, even though its extent
+    // is known.  The source words still come from initialized data, and all
+    // three destinations must lie inside the same (half-open) data segment.
+    Begin <= Dest1, Dest1 < End,
     // Make sure EA contains the FIRST evenly spaced pointer
     // of the sequence. Either there is no previous
-    // pointer or it points ouside the data segment.
+    // pointer or it points outside the data segment.
     (
         !next_address_in_data(EA-Diff,EA)
         ;
         next_address_in_data(EA-Diff,EA),
         address_in_data_refined(EA-Diff,Dest_prev),
-        (Dest_prev < Begin ; Dest_prev > End)
+        (Dest_prev < Begin ; Dest_prev >= End)
     ),
     // A pointer array pointing to data, should point to the same section
-    address_in_data_refined(EA+Diff,Dest2),data_byte(Dest2,_),
+    address_in_data_refined(EA+Diff,Dest2),
     next_address_in_data(EA+Diff,EA+(2*Diff)),
-    address_in_data_refined(EA+(2*Diff),Dest3),data_byte(Dest3,_),
-    Begin <= Dest2, Dest2 <= End,
-    Begin <= Dest3, Dest3 <= End.
+    address_in_data_refined(EA+(2*Diff),Dest3),
+    Begin <= Dest2, Dest2 < End,
+    Begin <= Dest3, Dest3 < End.
 
 
 address_array_aux(EA+Diff,Diff,"code",InitialEA):-
@@ -800,11 +804,11 @@ address_array_aux(EA+Diff,Diff,"data",InitialEA):-
     address_array_aux(EA,Diff,"data",InitialEA),
     address_in_data_refined(EA,Dest1),
     next_address_in_data(EA,EA+Diff),
-    address_in_data_refined(EA+Diff,Dest2),data_byte(Dest2,_),
+    address_in_data_refined(EA+Diff,Dest2),
     data_segment(Begin,End),
     // a pointer array pointing to data, should point to the same section
-    Begin <= Dest1, Dest1 <= End,
-    Begin <= Dest2, Dest2 <= End.
+    Begin <= Dest1, Dest1 < End,
+    Begin <= Dest2, Dest2 < End.
 
 /**
 This predicate is used for the symbolization heuristics. The
