@@ -286,6 +286,13 @@ protected:
     virtual void loadRegisterAccesses(BinaryFacts& Facts, uint64_t Addr,
                                       const cs_insn& CsInstruction);
 
+    // Registers the instruction reads and writes, named as in the
+    // register_access relation. The default is what cs_regs_access reports,
+    // with Capstone's register names in upper case. Loaders override it to
+    // correct or filter Capstone's answer.
+    virtual void registerAccesses(const cs_insn& CsInstruction, std::vector<std::string>& Reads,
+                                  std::vector<std::string>& Writes);
+
     // Disassemble bytes and build Instruction and Operand facts.
     virtual void decode(BinaryFacts& Facts, const uint8_t* Bytes, uint64_t Size, uint64_t Addr) = 0;
 

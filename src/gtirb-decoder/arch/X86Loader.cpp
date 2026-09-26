@@ -27,6 +27,8 @@
 #include <string>
 #include <vector>
 
+#include "X86Capstone.h"
+
 void X86Loader::decode(BinaryFacts& Facts, const uint8_t* Bytes, uint64_t Size, uint64_t Addr)
 {
     // Decode instruction with Capstone.
@@ -153,4 +155,11 @@ uint8_t X86Loader::operandAccess(const cs_insn& CsInstruction, uint64_t Index)
     const cs_x86& Details = CsInstruction.detail->x86;
     const cs_x86_op& op = Details.operands[Index];
     return op.access;
+}
+
+void X86Loader::registerAccesses(const cs_insn& CsInstruction, std::vector<std::string>& Reads,
+                                 std::vector<std::string>& Writes)
+{
+    InstructionLoader::registerAccesses(CsInstruction, Reads, Writes);
+    fixX86RegisterAccesses(CsInstruction, Reads, Writes);
 }

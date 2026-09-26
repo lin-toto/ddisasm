@@ -28,6 +28,7 @@
 #include <optional>
 #include <string>
 #include <tuple>
+#include <vector>
 
 #include "../Relations.h"
 #include "../core/InstructionLoader.h"
@@ -47,6 +48,8 @@ protected:
     void decode(BinaryFacts& Facts, const uint8_t* Bytes, uint64_t Size, uint64_t Addr) override;
     uint8_t operandCount(const cs_insn& CsInstruction) override;
     uint8_t operandAccess(const cs_insn& CsInstruction, uint64_t Index) override;
+    void registerAccesses(const cs_insn& CsInstruction, std::vector<std::string>& Reads,
+                          std::vector<std::string>& Writes) override;
 
 private:
     std::optional<relations::Operand> build(const cs_x86_op& CsOp);

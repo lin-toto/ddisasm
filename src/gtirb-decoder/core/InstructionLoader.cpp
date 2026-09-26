@@ -83,8 +83,9 @@ void InstructionLoader::insert(const BinaryFacts& Facts, souffle::SouffleProgram
 /**
 Load register access facts
 */
-void InstructionLoader::loadRegisterAccesses(BinaryFacts& Facts, uint64_t Addr,
-                                             const cs_insn& CsInstruction)
+void InstructionLoader::registerAccesses(const cs_insn& CsInstruction,
+                                         std::vector<std::string>& Reads,
+                                         std::vector<std::string>& Writes)
 {
     cs_regs RegsRead, RegsWrite;
     uint8_t RegsReadCount, RegsWriteCount;
@@ -93,19 +94,32 @@ void InstructionLoader::loadRegisterAccesses(BinaryFacts& Facts, uint64_t Addr,
        != CS_ERR_OK)
     {
         assert(!"cs_regs_access failed");
+        return;
     }
-
-    gtirb::Addr GtirbAddr = gtirb::Addr(Addr);
-
     for(uint8_t i = 0; i < RegsReadCount; i++)
     {
-        Facts.Instructions.registerAccess(relations::RegisterAccess{
-            GtirbAddr, "R", uppercase(cs_reg_name(*CsHandle, RegsRead[i]))});
+        Reads.push_back(uppercase(cs_reg_name(*CsHandle, RegsRead[i])));
     }
     for(uint8_t i = 0; i < RegsWriteCount; i++)
     {
-        Facts.Instructions.registerAccess(relations::RegisterAccess{
-            GtirbAddr, "W", uppercase(cs_reg_name(*CsHandle, RegsWrite[i]))});
+        Writes.push_back(uppercase(cs_reg_name(*CsHandle, RegsWrite[i])));
+    }
+}
+
+void InstructionLoader::loadRegisterAccesses(BinaryFacts& Facts, uint64_t Addr,
+                                             const cs_insn& CsInstruction)
+{
+    gtirb::Addr GtirbAddr = gtirb::Addr(Addr);
+
+    std::vector<std::string> Reads, Writes;
+    registerAccesses(CsInstruction, Reads, Writes);
+    for(const std::string& Reg : Reads)
+    {
+        Facts.Instructions.registerAccess(relations::RegisterAccess{GtirbAddr, "R", Reg});
+    }
+    for(const std::string& Reg : Writes)
+    {
+        Facts.Instructions.registerAccess(relations::RegisterAccess{GtirbAddr, "W", Reg});
     }
 
     uint64_t OpCount = operandCount(CsInstruction);
