@@ -32,7 +32,11 @@ class ElfSymbolForwardingTests(unittest.TestCase):
                     }
                 ''')
                 binary = root / "ex"
-                subprocess.run(["gcc", "-O0", *flags, str(source), "-o", str(binary)], check=True)
+                # The non-PIE pointer array needs retained relocation evidence;
+                # this test is about COPY forwarding, not legacy data guessing.
+                retained = ["-Wl,--emit-relocs"] if "-no-pie" in flags else []
+                subprocess.run(["gcc", "-O0", *flags, *retained,
+                                str(source), "-o", str(binary)], check=True)
                 relocs = subprocess.check_output(["readelf", "-rW", str(binary)], text=True)
                 self.assertIn("R_X86_64_COPY", relocs)
                 result = disassemble(binary)
@@ -58,7 +62,8 @@ class ElfSymbolForwardingTests(unittest.TestCase):
             source = root / "static.c"
             source.write_text("int main(void) { return 0; }\n")
             binary = root / "ex"
-            subprocess.run(["gcc", "-O0", "-static", str(source), "-o", str(binary)], check=True)
+            subprocess.run(["gcc", "-O0", "-static", "-Wl,--emit-relocs",
+                            str(source), "-o", str(binary)], check=True)
             module = disassemble(binary).ir().modules[0]
             symbol = next(module.symbols_named("__rela_iplt_start"))
             copy = next(module.symbols_named("__rela_iplt_start_copy"))
