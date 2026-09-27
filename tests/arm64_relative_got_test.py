@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 
 import gtirb
+from gtirb_functions import Function
+from gtirb_rewriting import Patch, RewritingContext, patch_constraints
 from disassemble_reassemble_check import asm_print, disassemble
 
 
@@ -81,7 +83,8 @@ class Arm64RelativeGotTest(unittest.TestCase):
             command = ["qemu-aarch64", "-L", "/usr/aarch64-linux-gnu", str(runner)]
             subprocess.run(command, check=True, capture_output=True, timeout=10)
             result = disassemble(original)
-            module = result.ir().modules[0]
+            ir = result.ir()
+            module = ir.modules[0]
 
             def attributes(name):
                 symbol = next(module.symbols_named(name))
@@ -97,8 +100,21 @@ class Arm64RelativeGotTest(unittest.TestCase):
                 self.assertNotIn(attribute.GOT, attributes(name), name)
             for name in ("data_load", "shared_add", "shared_load"):
                 self.assertIn(attribute.LO12, attributes(name), name)
+            # Move code as well as data so stale instruction-side addresses
+            # cannot remain accidentally correct in an ordinary round trip.
+            @patch_constraints()
+            def nop(_context):
+                return "nop\n" * 9
+
+            context = RewritingContext(module, Function.build_functions(module))
+            for block in tuple(module.code_blocks):
+                if block.size:
+                    context.insert_at(block, 0, Patch.from_function(nop))
+            context.apply()
+            moved_ir = root / "moved.gtirb"
+            ir.save_protobuf(moved_ir)
             printed = root / "printed.S"
-            self.assertEqual(asm_print(result.ir_path, printed).returncode, 0)
+            self.assertEqual(asm_print(moved_ir, printed).returncode, 0)
             text = printed.read_text()
             for gap in (0, 272, 8192):
                 with self.subTest(gap=gap):
