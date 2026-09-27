@@ -37,6 +37,19 @@ general_purpose_reg(Reg64):-
 register_size_bytes("WSP", 4).
 register_size_bytes("SP", 8).
 
+// Native Capstone names scalar SIMD/FP load destinations by their actual
+// width. They need access sizes too, without making them tracked GPRs.
+register_size_bytes(Reg, Size):-
+    I = range(0,32),
+    (
+        Prefix = "B", Size = 1;
+        Prefix = "H", Size = 2;
+        Prefix = "S", Size = 4;
+        Prefix = "D", Size = 8;
+        Prefix = "Q", Size = 16
+    ),
+    Reg = cat(Prefix, to_string(I)).
+
 reg_map_rule("WSP", "SP").
 
 // AAPCS64: X0-X18 and the link register are not preserved across calls.

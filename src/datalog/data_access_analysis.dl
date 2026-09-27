@@ -76,7 +76,15 @@ instruction_memory_access_size(EA,Index,SizeAccess):-
 data_access(EA,Op_index,RegSegment,RegBase,RegIndex,Mult,Offset,Size):-
     code(EA),
     instruction_get_op(EA,Op_index,Op),
-    op_indirect_mapped(Op,RegSegment,RegBase,RegIndex,Mult,Offset,_),
+    op_indirect_mapped(Op,RegSegment,RegBase,RegIndex,Mult,EncodedOffset,_),
+    (
+        // Native Capstone 6 puts the post-index increment in the memory
+        // operand. The access uses the old base; keep that increment in the
+        // operand facts for the independent writeback/value analysis.
+        binary_isa("ARM64"), instruction_post_index(EA), Offset = 0
+        ;
+        (!binary_isa("ARM64"); !instruction_post_index(EA)), Offset = EncodedOffset
+    ),
     instruction_memory_access_size(EA,Op_index,Size).
 
 // the register Reg has the given value at instruction EA and operand Op_index
