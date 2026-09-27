@@ -32,7 +32,9 @@ class ImplicitLiveRegistersTest(unittest.TestCase):
                 address = symbol.referent.address
                 if symbol.at_end:
                     address += symbol.referent.size
-            masks = [mask for offset, mask in module.aux_data["liveRegisterSets"].data.items()
+            high = module.aux_data.get("liveRegisterSetsHigh")
+            masks = [mask | ((high.data[offset] if high is not None else 0) << 64)
+                     for offset, mask in module.aux_data["liveRegisterSets"].data.items()
                      if offset.element_id.address + offset.displacement == address]
             self.assertTrue(masks, "probe instruction has no live-register metadata")
             names = module.aux_data["liveRegisterNames"].data
@@ -92,7 +94,14 @@ class ImplicitLiveRegistersTest(unittest.TestCase):
         for compiler, transfers, ret in cases:
             for transfer in transfers:
                 with self.subTest(compiler=compiler, transfer=transfer):
-                    self.check_mask(compiler, f"probe: {transfer}\n{ret}\n", None)
+                    # Unknown x64 calls use the vector ABI but retain the
+                    # conservative GPR policy. Unknown jumps have no ABI.
+                    expected = None
+                    if compiler == "gcc" and transfer.startswith("call"):
+                        expected = ("rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp",
+                                    "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+                                    "rflags", *(f"xmm{i}" for i in range(8)))
+                    self.check_mask(compiler, f"probe: {transfer}\n{ret}\n", expected)
 
     def test_conditional_tail_returns_preserve_private_caller_values(self):
         cases = (

@@ -28,10 +28,13 @@ class X64VectorLivenessTest(unittest.TestCase):
             'callee': 'movaps %xmm15,(%rdi); ret',
             'tail': 'jmp callee',
             'unknown': 'jmp *%rax',
+            'unknown_call': 'call *%rax; movaps %xmm12,(%rdi); ret',
             'returns': 'ret',
         }
         asm = '.text\n.globl _start\n.type _start,@function\n_start:\n'
-        asm += ''.join(f'call {name}\n' for name in bodies)
+        # Keep the independent instruction probes in separate call contexts.
+        # Calling them in sequence would legitimately make a later probe's
+        # inputs live through every earlier leaf after interprocedural analysis.
         asm += 'mov $60,%eax; xor %edi,%edi; syscall\n.size _start,.-_start\n'
         for name, body in bodies.items():
             asm += f'.globl {name}\n.type {name},@function\n{name}:\n{body}\n.size {name},.-{name}\n'
@@ -67,8 +70,65 @@ class X64VectorLivenessTest(unittest.TestCase):
             self.assertNotIn('k7', live('zero_k'))
             self.assertEqual(live('zero_all'), set())
             self.assertTrue({'xmm31','ymm31h','zmm31h'} <= live('all_pieces'))
-            self.assertEqual(live('caller'), {f'xmm{i}' for i in range(8)})
-            self.assertEqual(live('tail'), {f'xmm{i}' for i in range(8)})
+            self.assertEqual(live('caller'), {'xmm0', 'xmm1', 'xmm12', 'xmm15'})
+            self.assertEqual(live('tail'), {'xmm0', 'xmm1', 'xmm12', 'xmm15'})
             self.assertEqual(live('returns'), {'xmm0','xmm1'})
-            self.assertNotIn('xmm12', live('callee'))
+            self.assertIn('xmm12', live('callee'))
             self.assertEqual(len(live('unknown')), 104)
+            self.assertEqual(live('unknown_call'), {f'xmm{i}' for i in range(8)})
+
+    def test_ipa_register_allocation_through_local_calls(self):
+        # The critical part of GCC -O2 -fipa-ra ipara5/ipara6: high vectors
+        # remain live at a branch before a leaf call. A transitive tail callee
+        # overwrites xmm10 only; xmm8/9 must survive both calls and rollback.
+        asm = '''.text
+        .globl _start
+        .type _start,@function
+        _start:
+          mov $60,%eax
+          xor %edi,%edi
+          syscall
+        .size _start,.-_start
+        .globl ipara6
+        .type ipara6,@function
+        ipara6:
+          movsd 64(%rdi),%xmm8
+          movsd 72(%rdi),%xmm9
+          cmp $3,%rsi
+        .globl checkpoint_site
+        checkpoint_site:
+          jle 1f
+          add $7,%rsi
+        1:
+          call leaf
+          addsd %xmm8,%xmm0
+          addsd %xmm9,%xmm0
+          addsd %xmm10,%xmm0
+          ret
+        .size ipara6,.-ipara6
+        .type leaf,@function
+        leaf:
+          lea 1(%rsi,%rsi,2),%rax
+          jmp leaf_tail
+        .size leaf,.-leaf
+        .type leaf_tail,@function
+        leaf_tail:
+          pxor %xmm10,%xmm10
+          ret
+        .size leaf_tail,.-leaf_tail
+        .section .note.GNU-stack,"",@progbits
+        '''
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'input.S').write_text(asm)
+            subprocess.run(['gcc', '-nostdlib', '-no-pie', '-Wl,--emit-relocs',
+                            str(root/'input.S'), '-o', str(root/'input')], check=True)
+            module = disassemble(root/'input').ir().modules[0]
+            site = next(module.symbols_named('checkpoint_site')).referent
+            offset = gtirb.Offset(site, 0)
+            mask = (module.aux_data['liveRegisterSets'].data[offset] |
+                    (module.aux_data['liveRegisterSetsHigh'].data[offset] << 64))
+            names = module.aux_data['liveRegisterNames'].data
+            live = {n for i, n in enumerate(names) if mask & (1 << i)}
+            self.assertTrue({'xmm8', 'xmm9'} <= live)
+            self.assertNotIn('xmm10', live)
