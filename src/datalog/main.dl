@@ -528,6 +528,34 @@ instruction_has_relocation(EA,EA+Offset):-
     ),
     relocation(EA+Offset,_,_,_,_,_,_).
 
+/**
+A linked ELF instruction whose relocation was retained by --emit-relocs.
+Its encoded destination has already been resolved by the linker. In particular,
+the relocation's symbol index belongs to .symtab, not the runtime .dynsym.
+Keep using the decoded destination for CFG recovery; symbolization separately
+preserves the relocation for subsequent movement of the instruction.
+*/
+.decl instruction_has_retained_relocation(EA:address)
+
+instruction_has_retained_relocation(EA):-
+    binary_format("ELF"),
+    !binary_type("REL"),
+    !elf_has_runtime_text_relocations(),
+    instruction_has_relocation(EA,Rel),
+    relocation(Rel,_,_,_,_,Section,_),
+    elf_static_relocation_section(Section).
+
+// An encoded branch is not authoritative when the dynamic loader can still
+// relocate text. Be conservative for the whole module in this uncommon case.
+.decl elf_has_runtime_text_relocations()
+
+elf_has_runtime_text_relocations():-
+    dynamic_entry("TEXTREL",_).
+
+elf_has_runtime_text_relocations():-
+    dynamic_entry("FLAGS",Flags),
+    (Flags band 4) != 0. // DF_TEXTREL
+
 // JUMPS
 .decl unconditional_jump(n:address)
 
@@ -564,6 +592,8 @@ direct_jump(EA,as(Dest,address)):-
         // Relocations in PEs don't override the destination by default,
         // only if base_image is changed.
         binary_format("PE")
+    ;
+        instruction_has_retained_relocation(EA)
     ).
 
 direct_jump(EA,as(Dest,address)):-
@@ -572,6 +602,7 @@ direct_jump(EA,as(Dest,address)):-
     arch.jump(EA),
     instruction_immediate_offset(EA,_,_,_),
     instruction_has_relocation(EA,Rel),
+    !instruction_has_retained_relocation(EA),
     relocation(Rel,_,_,_,SymbolIndex,_,_),
     relocation_active_symbol_table(SymbolTable),
     defined_symbol(Dest,_,_,_,_,_,SymbolTable,SymbolIndex,_).
@@ -646,6 +677,8 @@ direct_call(EA,as(Dest,address)):-
         // Relocations in PEs don't override the destination by default,
         // only if base_image is changed.
         binary_format("PE")
+    ;
+        instruction_has_retained_relocation(EA)
     ).
 
 direct_call(EA,Dest):-
@@ -655,6 +688,7 @@ direct_call(EA,Dest):-
     arch.call(EA,_),
     instruction_immediate_offset(EA,_,_,_),
     instruction_has_relocation(EA,Rel),
+    !instruction_has_retained_relocation(EA),
     relocation(Rel,_,_,_,SymbolIndex,_,_),
     relocation_active_symbol_table(SymbolTable),
     defined_symbol(Dest,_,_,_,_,_,SymbolTable,SymbolIndex,_).
