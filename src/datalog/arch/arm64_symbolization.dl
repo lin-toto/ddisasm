@@ -566,6 +566,15 @@ movz_movk_member(EA, EA_first, EA_last):-
     movz_movk_chain(EA_first, EA, _, _, _, _),
     EA != EA_first.
 
+// Zero-valued upper MOVK lanes must still relocate if the complete address
+// later crosses a 16-bit boundary. The standalone-immediate bitmask heuristic
+// must not discard just those lanes of an otherwise recognized construction.
+// Scalar-use penalties below still judge the value of the *whole* chain.
+reconstructed_address_fragment(EA,1):-
+    movz_movk_member(EA,EA_first,EA_last),
+    movz_movk_chain(EA_first,EA_last,_,_,_,Count),
+    Count > 1.
+
 /**
 Helper: map a shift amount to the corresponding group attribute name.
 */

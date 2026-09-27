@@ -338,6 +338,13 @@ symbolic_operand_point(EA,Imm_index,-2,
     Dest < Beg+Size,
     !defined_symbol(Dest,_,_,_,_,_,_,_,_).
 
+// A fragment belongs to a reconstructed address rather than being interpreted
+// as an independent scalar. Architectures add their multi-instruction forms.
+.decl reconstructed_address_fragment(EA:address,Index:operand_index)
+
+reconstructed_address_fragment(EA,Index):-
+    split_load_operand(EA,Index,_).
+
 // Heuristic: treat values with >=20 trailing zero bits (0xFFFFF) as bitmasks.
 //
 // This threshold is empirical, not architectural. It was chosen to avoid
@@ -352,7 +359,7 @@ symbolic_operand_point(EA,Imm_index,-1,"immediate may be bitmask"):-
     // A recovered address fragment is not a standalone scalar immediate.
     // In particular, a zero LO12 tail must relocate if its page-aligned
     // target later moves within a page.
-    !split_load_operand(EA,Imm_index,_),
+    !reconstructed_address_fragment(EA,Imm_index),
     instruction_get_op(EA,Imm_index,Op),
     op_immediate(Op,Imm,_),
     !direct_call(EA,_),
