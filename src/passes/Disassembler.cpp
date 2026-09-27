@@ -504,6 +504,26 @@ gtirb::Symbol *findExpressionSymbol(
         return findFirstSymbol(Module, Name);
     if(auto *Symbol = findSymbol(Module, *Target, Name))
         return Symbol;
+
+    // COPY relocations and linker-defined ABI symbols were deliberately
+    // renamed by buildSymbolForwarding. The Datalog identity still names the
+    // original (address, name), while its public symbol is now address-less.
+    // Follow only that exact address's explicit forwarding edge: falling back
+    // to a name alone would reintroduce ambiguous local-symbol resolution.
+    if(auto *Forwarding = Module.getAuxData<gtirb::schema::SymbolForwarding>())
+    {
+        for(auto &Source : Module.findSymbols(*Target))
+        {
+            auto Forward = Forwarding->find(Source.getUUID());
+            if(Forward == Forwarding->end())
+                continue;
+            for(auto &Destination : Module.findSymbols(Name))
+            {
+                if(Destination.getUUID() == Forward->second)
+                    return &Destination;
+            }
+        }
+    }
     std::cerr << "Missing symbol " << Name << " at " << *Target
               << " in expression at " << EA << std::endl;
     exit(1);
@@ -2045,4 +2065,3 @@ void performSanityChecks(AnalysisPassResult &Result, souffle::SouffleProgram &Pr
         Result.Warnings.push_back(WarnMsg.str());
     }
 }
-
