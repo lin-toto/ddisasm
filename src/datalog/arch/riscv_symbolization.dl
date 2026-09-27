@@ -1176,6 +1176,47 @@ riscv_relative_jump_table_access(EAJump,TableStart,EALoad,RegIndexScaled):-
 riscv_relative_jump_table_base(EAJump,TableStart):-
     riscv_relative_jump_table_access(EAJump,TableStart,_,_).
 
+// The byte index can already be scaled on entry to this block. In particular,
+// a fall-through switch can reuse an index from an earlier switch whose CFG
+// edges are not available during value analysis. Requiring a reaching SLLI
+// definition then creates a cycle: recovering this table needs those edges.
+// The local base/add/LW/add/jump chain still establishes a relative dispatch.
+// Without the scaling provenance, require two adjacent entries that resolve
+// to confirmed code, and keep both reads inside the same data segment.
+riscv_relative_jump_table_access(EAJump,TableStart,EALoad,RegIndex):-
+    riscv_split_load(_,EABase,_,TableStart),
+    arch.reg_reg_arithmetic_operation(EAAddr,RegAddr,RegIndex,RegBase,1,0),
+    RegBase != RegIndex,
+    reg_def_use.def_used(EABase,RegBase,EAAddr,_),
+    reg_def_use.def_used(EAAddr,RegAddr,EALoad,_),
+    arch.memory_access("LOAD",EALoad,_,_,RegTarget,RegAddr,"NONE",1,0),
+    (
+        instruction_get_operation(EALoad,"LW");
+        instruction_get_operation(EALoad,"C.LW")
+    ),
+    data_access(EALoad,_,_,RegAddr,"NONE",1,0,4),
+    reg_def_use.def_used(EALoad,RegTarget,EAAdd,_),
+    arch.reg_reg_arithmetic_operation(EAAdd,RegJump,RegTarget,RegBase,1,0),
+    reg_def_use.def_used(EABase,RegBase,EAAdd,_),
+    reg_def_use.def_used(EAAdd,RegJump,EAJump,_),
+    reg_jump(EAJump,RegJump),
+    code(EAJump),
+    data_segment(BegData,EndData),
+    TableStart % 4 = 0,
+    BegData <= TableStart, TableStart+8 <= EndData,
+    data_word(TableStart,4,Offset1),
+    code(as(as(TableStart,number)+Offset1,address)),
+    data_word(TableStart+4,4,Offset2),
+    code(as(as(TableStart,number)+Offset2,address)).
+
+// Follow the connected use-def chain before examining any table contents.
+.plan 0: (1, 3, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16),
+      1: (3, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16),
+      2: (4, 5, 6, 7, 2, 3, 1, 8, 9, 10, 11, 12, 13, 14, 15, 16),
+      3: (8, 5, 6, 7, 9, 11, 12, 13, 10, 1, 4, 2, 3, 14, 15, 16),
+      4: (10, 9, 11, 12, 13, 1, 8, 5, 6, 7, 4, 2, 3, 14, 15, 16),
+      5: (11, 12, 13, 9, 8, 5, 6, 7, 10, 1, 4, 2, 3, 14, 15, 16)
+
 jump_table_element_access(EALoad,4,TableStart,RegIndex):-
     riscv_relative_jump_table_access(_,TableStart,EALoad,RegIndex).
 
