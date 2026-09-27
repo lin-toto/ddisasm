@@ -1009,6 +1009,14 @@ void ElfReader::buildSymbols()
     for(auto &[Key, VersionMap] : Symbols)
     {
         auto &[Value, Size, Type, Scope, Visibility, SecIndex, Name] = Key;
+        // st_value in a nonallocated section is a section offset, not a
+        // process address. Debug labels can numerically overlap live code;
+        // retain their identity/metadata without giving them an address.
+        // Special indices (UNDEF/ABS/COMMON/etc.) are not ordinary sections.
+        bool NonAllocated = SecIndex > 0
+                            && SecIndex < static_cast<int>(LIEF_SYMBOL_SECTION_INDEX::LIEF_SHN_LORESERVE)
+                            && SecIndex < Elf->sections().size()
+                            && !Elf->sections()[SecIndex].has(LIEF::ELF::Section::FLAGS::ALLOC);
         for(auto &[Version, Indexes] : VersionMap)
         {
             std::string VersionedName = Name;
@@ -1024,12 +1032,13 @@ void ElfReader::buildSymbols()
             // See
             // https://docs.oracle.com/cd/E23824_01/html/819-0690/chapter6-94076.html#chapter6-tbl-16
             // FILE symbols do not have an address either.
-            if((SecIndex == static_cast<int>(LIEF::ELF::Symbol::SECTION_INDEX::UNDEF)
+            if(NonAllocated
+               || ((SecIndex == static_cast<int>(LIEF::ELF::Symbol::SECTION_INDEX::UNDEF)
                 || (SecIndex >= static_cast<int>(LIEF_SYMBOL_SECTION_INDEX::LIEF_SHN_LORESERVE)
                     && SecIndex <= static_cast<int>(LIEF_SYMBOL_SECTION_INDEX::LIEF_SHN_HIRESERVE)
                     && SecIndex != static_cast<int>(LIEF::ELF::Symbol::SECTION_INDEX::ABS))
                 || Type == "FILE")
-               && Value == 0)
+                   && Value == 0))
             {
                 S = Module->addSymbol(*Context, VersionedName);
             }

@@ -89,6 +89,14 @@ void ElfSymbolLoader(const gtirb::Module &Module, souffle::SouffleProgram &Progr
         }
 
         auto [Size, Type, Binding, Visibility, SectionIndex] = Info;
+        // The ELF reader deliberately leaves nonallocated-section definitions
+        // addressless. Do not turn their missing address into a runtime zero
+        // symbol during inference. Undefined and reserved-index ABI symbols
+        // still participate in relocation and symbol-forwarding rules.
+        if(!Symbol.getAddress() && SectionIndex > 0 && SectionIndex < 0xff00)
+        {
+            continue;
+        }
         if(TableIndexes.size() > 0)
         {
             for(auto &IndexPair : TableIndexes)
