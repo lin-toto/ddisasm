@@ -315,6 +315,7 @@ Type of relocation relevant to pc-relative attribute
 .decl reloc_type_relpc(Type:symbol)
 
 reloc_type_relpc("PC32").
+reloc_type_relpc("GOTPCREL").
 reloc_type_relpc("GOTPCRELX").
 reloc_type_relpc("REX_GOTPCRELX").
 reloc_type_relpc("PLT32").
@@ -345,6 +346,7 @@ reloc_type_with_name("R64").
 reloc_type_with_name("R32S").
 reloc_type_with_name("PC32").
 reloc_type_with_name("PLT32").
+reloc_type_with_name("GOTPCREL").
 reloc_type_with_name("GOTPCRELX").
 reloc_type_with_name("REX_GOTPCRELX").
 reloc_type_with_name("ABS64").

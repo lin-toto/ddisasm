@@ -48,6 +48,7 @@ symbolic_operand_attribute(EA,Index,"PCREL"):-
     instruction_displacement_offset(EA,Index,Offset,_),
     symbolic_expr_from_relocation(EA+Offset,_,_,_,_),
     (
+        relocation(EA+Offset,"GOTPCREL",_,_,_,_,_);
         relocation(EA+Offset,"GOTPCRELX",_,_,_,_,_);
         relocation(EA+Offset,"REX_GOTPCRELX",_,_,_,_,_)
     ).

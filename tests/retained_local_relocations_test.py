@@ -11,6 +11,53 @@ import gtirb
 @unittest.skipUnless(shutil.which("gcc") and shutil.which("gtirb-pprinter"),
                      "requires x64 ELF compiler and printer")
 class RetainedLocalRelocationsTest(unittest.TestCase):
+    def test_nonrelaxable_gotpcrel_cmov_after_relayout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "input.S"
+            source.write_text("""
+                .text
+                .globl _start
+                .type _start,@function
+            _start:
+                xorl %eax,%eax
+                testl %eax,%eax
+                cmoveq target@GOTPCREL(%rip),%rax
+                xorl %edi,%edi
+                cmpq $37,(%rax)
+                setne %dil
+                movl $60,%eax
+                syscall
+                .size _start,.-_start
+                .data
+                .globl target
+                .hidden target
+                .type target,@object
+            target:
+                .quad 37
+                .size target,.-target
+                .section .note.GNU-stack,"",@progbits
+            """)
+            cc = ["gcc", "-nostdlib", "-no-pie", "-Wl,--build-id=none"]
+            original = root / "original"
+            subprocess.run(cc + [str(source), "-Wl,--emit-relocs", "-o", str(original)],
+                           check=True, capture_output=True)
+            relocations = subprocess.check_output(["readelf", "-Wr", str(original)], text=True)
+            self.assertIn(" R_X86_64_GOTPCREL ", relocations)
+            subprocess.run([str(original)], check=True)
+            path = root / "ir.gtirb"
+            subprocess.run(["ddisasm", str(original), "--ir", str(path), "-j", "1"],
+                           check=True, capture_output=True)
+            assembly = root / "output.S"
+            subprocess.run(["gtirb-pprinter", "--ir", str(path), "--asm", str(assembly),
+                            "--policy", "complete", "--shared", "no"],
+                           check=True, capture_output=True)
+            rewritten = root / "rewritten"
+            subprocess.run(cc + [str(assembly), "-Wl,--section-start=.text=0x500000",
+                                 "-Wl,--section-start=.data=0x700000", "-o", str(rewritten)],
+                           check=True, capture_output=True)
+            subprocess.run([str(rewritten)], check=True, timeout=10)
+
     def test_distinct_local_targets_and_addends_after_relayout(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
