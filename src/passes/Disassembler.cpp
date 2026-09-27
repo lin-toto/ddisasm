@@ -22,6 +22,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "Disassembler.h"
+#include "Arm64PageReferences.h"
 
 #include <boost/uuid/uuid_generators.hpp>
 #include <iterator>
@@ -1944,6 +1945,7 @@ void disassembleModule(gtirb::Context &Context, gtirb::Module &Module,
     connectSymbolsToBlocks(Context, Module, Program);
     // These functions should not create additional symbols.
     buildCFG(Context, Module, Program);
+    completeArm64PageReferences(Module);
     buildPadding(Module, Program);
     buildComments(Module, Program, SelfDiagnose);
     buildDynamicAuxdata(Module);

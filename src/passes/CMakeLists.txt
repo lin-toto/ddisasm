@@ -19,14 +19,18 @@ endif()
 
 # ============ Disassembly pass =================
 
-add_library(disassembly_pass STATIC DisassemblyPass.cpp Disassembler.cpp)
+add_library(disassembly_pass STATIC DisassemblyPass.cpp Disassembler.cpp
+                                    Arm64PageReferences.cpp)
 
 if(SOUFFLE_INCLUDE_DIR)
   target_include_directories(disassembly_pass SYSTEM
                              PRIVATE ${SOUFFLE_INCLUDE_DIR})
 endif()
 
-target_link_libraries(disassembly_pass gtirb gtirb_pprinter)
+target_link_libraries(disassembly_pass gtirb gtirb_pprinter ${CAPSTONE})
+if(CAPSTONE_INCLUDE_DIR)
+  target_include_directories(disassembly_pass PRIVATE ${CAPSTONE_INCLUDE_DIR})
+endif()
 
 target_compile_definitions(disassembly_pass PRIVATE __EMBEDDED_SOUFFLE__)
 target_compile_definitions(disassembly_pass PRIVATE RAM_DOMAIN_SIZE=64)
