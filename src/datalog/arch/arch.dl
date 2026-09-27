@@ -315,7 +315,15 @@ value and def-use analyses should continue to use `load`.
 
 memory_read(EA,MemOp,BaseReg,IndexReg,Mult,Offset,AccessSize):-
     instruction_get_src_op(EA,MemOp,Op),
+    !instruction_post_index(EA),
     op_indirect_mapped(Op,_,BaseReg,IndexReg,Mult,Offset,_),
+    instruction_memory_access_size(EA,MemOp,AccessSize),
+    AccessSize > 0.
+
+memory_read(EA,MemOp,BaseReg,"NONE",0,0,AccessSize):-
+    instruction_get_src_op(EA,MemOp,Op),
+    instruction_post_index(EA),
+    op_indirect_mapped(Op,_,BaseReg,_,_,_,_),
     instruction_memory_access_size(EA,MemOp,AccessSize),
     AccessSize > 0.
 

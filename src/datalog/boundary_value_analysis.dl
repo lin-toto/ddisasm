@@ -164,8 +164,10 @@ value_reg_limit(EA,EA_next,DstReg,Max,"MAX"):-
     op_regdirect(DstOp,DstInputReg),
     op_regdirect_contains_reg(DstOp,DstReg),
     arch.register_size_bytes(DstInputReg,SizeBytes),
-    instruction_get_op(EA,_,ImmOp),
-    op_immediate(ImmOp,Shift,_),
+    (
+        instruction_get_op(EA,_,ImmOp), op_immediate(ImmOp,Shift,_);
+        op_shifted(EA,1,NativeShift,"LSR"), Shift = as(NativeShift,number)
+    ),
     Width = as(SizeBytes,number)*8,
     Shift > 0,
     Shift < Width,

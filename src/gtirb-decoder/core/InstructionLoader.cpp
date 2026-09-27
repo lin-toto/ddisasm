@@ -66,6 +66,7 @@ void InstructionLoader::insert(const BinaryFacts& Facts, souffle::SouffleProgram
     auto& [Instructions, Operands] = Facts;
     relations::insert(Program, "instruction", Instructions.instructions());
     relations::insert(Program, "instruction_writeback", Instructions.writeback());
+    relations::insert(Program, "instruction_post_index", Instructions.postIndex());
     relations::insert(Program, "instruction_cond_code", Instructions.conditionCode());
     relations::insert(Program, "instruction_op_access", Instructions.opAccess());
     relations::insert(Program, "invalid_op_code", Instructions.invalid());

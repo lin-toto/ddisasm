@@ -241,6 +241,13 @@ binary_isa(ArchName):-
 .input instruction_writeback
 
 /**
+Native AArch64 post-indexed addressing. The memory displacement is the base
+update after the access, not an offset added to its effective address.
+*/
+.decl instruction_post_index(EA:address)
+.input instruction_post_index
+
+/**
  The instruction at EA has capstone's cs_arm.cc set.
 */
 .decl instruction_cond_code(EA:address,CondCode:symbol)

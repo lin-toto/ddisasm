@@ -176,6 +176,16 @@ public:
         return InstructionWritebackList;
     }
 
+    void postIndex(gtirb::Addr Addr)
+    {
+        PostIndexedInstructions.push_back(Addr);
+    }
+
+    const std::vector<gtirb::Addr>& postIndex() const
+    {
+        return PostIndexedInstructions;
+    }
+
     void conditionCode(const relations::InstructionCondCode& CondCode)
     {
         InstructionCondCodeList.push_back(CondCode);
@@ -212,6 +222,7 @@ private:
     std::vector<relations::ShiftedOp> ShiftedOps;
     std::vector<relations::ShiftedWithRegOp> ShiftedWithRegOps;
     std::vector<relations::InstructionWriteback> InstructionWritebackList;
+    std::vector<gtirb::Addr> PostIndexedInstructions;
     std::vector<relations::InstructionCondCode> InstructionCondCodeList;
     std::vector<relations::InstructionOpAccess> InstructionOpAccessList;
     std::vector<relations::RegisterAccess> RegisterAccesses;

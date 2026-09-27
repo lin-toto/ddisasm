@@ -54,6 +54,25 @@ inline void fixAArch64Capstone6Accesses(cs_insn& Insn)
                 A.operands[0].access = CS_AC_READ_WRITE;
             }
             break;
+        case AARCH64_INS_SWP:
+        case AARCH64_INS_SWPA:
+        case AARCH64_INS_SWPAL:
+        case AARCH64_INS_SWPL:
+        case AARCH64_INS_SWPB:
+        case AARCH64_INS_SWPAB:
+        case AARCH64_INS_SWPALB:
+        case AARCH64_INS_SWPLB:
+        case AARCH64_INS_SWPH:
+        case AARCH64_INS_SWPAH:
+        case AARCH64_INS_SWPALH:
+        case AARCH64_INS_SWPLH:
+            // Alpha11 omits the memory access on the atomic swap family.
+            // SWP reads the old memory value and stores the source register;
+            // its explicit register accesses are already correct.
+            for(unsigned I = 0; I < A.op_count; ++I)
+                if(A.operands[I].type == AARCH64_OP_MEM)
+                    A.operands[I].access = CS_AC_READ_WRITE;
+            break;
         default:
             break;
     }

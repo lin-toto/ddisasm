@@ -84,6 +84,13 @@ arithmetic_operation("MVN").
 multiplication_operation("MUL").
 multiplication_operation("LSL").
 
+// Native immediate LSL aliases store the amount on their source operand.
+reg_arithmetic_operation(EA,Dst,Src,2^as(Shift,number),0):-
+    instruction(EA,_,_,"LSL",SrcOp,DstOp,0,0,_,_),
+    op_regdirect_contains_reg(SrcOp,Src),
+    op_regdirect_contains_reg(DstOp,Dst),
+    op_shifted(EA,1,Shift,"LSL").
+
 shift_rotate_operation("ASR").
 shift_rotate_operation("LSL").
 shift_rotate_operation("LSR").

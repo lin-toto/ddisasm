@@ -56,7 +56,7 @@ TEST(CapstoneAccess, AArch64NativeReadsAndWrites)
     EXPECT_EQ(registers(Cbz, "R"), (std::set<std::string>{"X2"}));
     EXPECT_TRUE(registers(Cbz, "W").empty());
     const auto Ret = decode<Arm64Loader>({0xc0, 0x03, 0x5f, 0xd6});
-    EXPECT_EQ(registers(Ret, "R"), (std::set<std::string>{"LR"}));
+    EXPECT_EQ(registers(Ret, "R"), (std::set<std::string>{"X30"}));
     const auto Svc = decode<Arm64Loader>({0x01, 0x00, 0x00, 0xd4});
     EXPECT_TRUE(registers(Svc, "W").empty());
 
@@ -164,4 +164,59 @@ TEST(CapstoneAccess, RiscVCompressedAndAtomicAccesses)
     const auto Amo = decodeRiscv({0x2f, 0x25, 0xb6, 0x0e}); // amoswap.w.aqrl
     ASSERT_EQ(Amo.Operands.indirect().size(), 1);
     EXPECT_EQ(Amo.Operands.indirect().begin()->first.Size, 4);
+}
+
+TEST(CapstoneAccess, AArch64NativeMemoryAndShiftShapes)
+{
+    const auto Post = decode<Arm64Loader>({0x20, 0x04, 0x41, 0xf8});
+    ASSERT_EQ(Post.Instructions.instructions().size(), 1);
+    EXPECT_EQ(Post.Instructions.instructions()[0].OpCodes.size(), 2);
+    ASSERT_EQ(Post.Operands.indirect().size(), 1);
+    EXPECT_EQ(Post.Operands.indirect().begin()->first.Disp, 16);
+    EXPECT_EQ(Post.Instructions.postIndex().size(), 1);
+    const auto Literal = decode<Arm64Loader>({0x80, 0x00, 0x00, 0x58});
+    ASSERT_EQ(Literal.Operands.indirect().size(), 1);
+    EXPECT_EQ(Literal.Operands.indirect().begin()->first.Reg2, "NONE");
+    EXPECT_EQ(Literal.Operands.indirect().begin()->first.Disp, 0x10010);
+    const auto Shift = decode<Arm64Loader>({0x20, 0xf0, 0x7d, 0xd3});
+    ASSERT_EQ(Shift.Instructions.instructions().size(), 1);
+    EXPECT_EQ(Shift.Instructions.instructions()[0].OpCodes.size(), 2);
+    ASSERT_EQ(Shift.Instructions.shiftedOps().size(), 1);
+    EXPECT_EQ(Shift.Instructions.shiftedOps()[0].Shift, 3);
+    const auto VariableShift = decode<Arm64Loader>({0x20, 0x20, 0xc2, 0x9a});
+    ASSERT_EQ(VariableShift.Instructions.instructions().size(), 1);
+    EXPECT_EQ(VariableShift.Instructions.instructions()[0].OpCodes.size(), 2);
+    EXPECT_EQ(VariableShift.Instructions.shiftedWithRegOps().size(), 1);
+    EXPECT_EQ(registers(VariableShift, "R"), (std::set<std::string>{"X1", "X2"}));
+}
+
+TEST(CapstoneAccess, AArch64AtomicSwapReadsAndWritesMemory)
+{
+    const auto Swap = decode<Arm64Loader>({0xe6, 0x80, 0x25, 0xf8}); // swp x5,x6,[x7]
+    EXPECT_EQ(registers(Swap, "R"), (std::set<std::string>{"X5", "X7"}));
+    EXPECT_EQ(registers(Swap, "W"), (std::set<std::string>{"X6"}));
+    std::set<std::string> MemoryAccess;
+    for(const auto& Access : Swap.Instructions.opAccess())
+    {
+        if(Access.Index == 2) // Native third operand, after first-operand rotation.
+            MemoryAccess.insert(Access.Mode);
+    }
+    EXPECT_EQ(MemoryAccess, (std::set<std::string>{"R", "W"}));
+}
+
+TEST(CapstoneAccess, AArch64NativeSystemAndPredicateOperands)
+{
+    const auto Prefetch = decode<Arm64Loader>({0x00, 0x00, 0x80, 0xf9});
+    ASSERT_EQ(Prefetch.Instructions.instructions().size(), 1);
+    EXPECT_EQ(Prefetch.Instructions.instructions()[0].OpCodes.size(), 2);
+    ASSERT_EQ(Prefetch.Operands.special().size(), 1);
+    const auto Bti = decode<Arm64Loader>({0x5f, 0x24, 0x03, 0xd5});
+    ASSERT_EQ(Bti.Instructions.instructions().size(), 1);
+    EXPECT_EQ(Bti.Instructions.instructions()[0].OpCodes.size(), 1);
+    const auto Sve = decode<Arm64Loader>({0x20, 0x80, 0xd8, 0x65});
+    ASSERT_EQ(Sve.Instructions.instructions().size(), 1);
+    ASSERT_EQ(Sve.Operands.fp_imm().size(), 1);
+    EXPECT_EQ(Sve.Operands.fp_imm().begin()->first.Value, 1.0);
+    EXPECT_TRUE(Sve.Instructions.writeback().empty()); // tied vector, not base writeback
+    EXPECT_EQ(registers(Sve, "R"), (std::set<std::string>{"Z0", "P0"}));
 }

@@ -30,30 +30,21 @@ register_size_bytes(Reg32, 4),
 register_size_bytes(Reg64, 8),
 reg_map_rule(Reg32, Reg64),
 general_purpose_reg(Reg64):-
-    I = range(0,29),
+    I = range(0,31),
     Reg32 = cat("W", to_string(I)),
     Reg64 = cat("X", to_string(I)).
 
-register_size_bytes("W29", 4).
-register_size_bytes("W30", 4).
 register_size_bytes("WSP", 4).
-register_size_bytes("FP", 8).
-register_size_bytes("LR", 8).
 register_size_bytes("SP", 8).
 
-reg_map_rule("W29", "FP").
-reg_map_rule("W30", "LR").
 reg_map_rule("WSP", "SP").
 
-general_purpose_reg("FP").
-general_purpose_reg("LR").
-
-// Use the 'System V AMD64 ABI' calling convention.
+// AAPCS64: X0-X18 and the link register are not preserved across calls.
 function_non_maintained_reg(Reg):-
     I = range(0,19),
     Reg = cat("X", to_string(I)).
 
-function_non_maintained_reg("FP").
+function_non_maintained_reg("X30").
 
 // PC is not a register in aarch64
 pc_reg(""):-
@@ -79,17 +70,15 @@ integer_reg_param("X6",7).
 integer_reg_param("X7",8).
 
 arch.lra_register(Reg,I,Name):-
-    I = range(0,29),
+    I = range(0,31),
     Reg = cat("X",to_string(I)),
     Name = cat("x",to_string(I)).
-arch.lra_register("FP",29,"x29").
-arch.lra_register("LR",30,"x30").
 arch.lra_register("NZCV",31,"nzcv").
 
 arch.lra_caller_saved(Reg):-
     I = range(0,19),
     Reg = cat("X",to_string(I)).
-arch.lra_caller_saved("LR").
+arch.lra_caller_saved("X30").
 arch.lra_caller_saved("NZCV").
 
 arch.lra_argument_register(Reg):-
@@ -103,38 +92,5 @@ arch.lra_register_write_kills(RegIn,Reg):-
     reg_map(RegIn,Reg),
     arch.lra_register(Reg,_,_).
 
-// Capstone can mark the first register of a flag-only alias as a destination
-// (for example CMP X0,X1). These instructions read all explicit registers and
-// write only NZCV. Correct def/use as well as liveness: a fictitious GPR write
-// otherwise severs pointer provenance at the comparison itself.
-.decl arm64_flag_only_alias(Operation:symbol)
-arm64_flag_only_alias("CMP").
-arm64_flag_only_alias("CMN").
-arm64_flag_only_alias("TST").
-arm64_flag_only_alias("CCMP").
-arm64_flag_only_alias("CCMN").
-
-arch.register_access_override(EA,Reg,"R",1),
-arch.register_access_override(EA,Reg,"W",0):-
-    instruction_get_operation(EA,Operation),
-    arm64_flag_only_alias(Operation),
-    instruction_get_op(EA,_,Op),
-    op_regdirect_contains_reg(Op,Reg).
-
-// Capstone omits some source-register reads for aliases, stores, and test branches.
-arch.lra_extra_use(EA,Reg):-
-    instruction(EA,_,_,Operation,_,_,_,_,_,_),
-    (
-        Operation = "CMP";
-        Operation = "CMN";
-        Operation = "TST";
-        Operation = "CCMP";
-        Operation = "CCMN";
-        arch.test_jump_operation(Operation,_,_);
-        substr(Operation,0,2) = "ST"
-    ),
-    instruction_get_op(EA,_,Op),
-    (
-        op_regdirect_contains_reg(Op,Reg);
-        op_indirect_contains_reg(Op,Reg)
-    ).
+// Register accesses come from the native decoder, including aliases, stores,
+// test branches and X30 at returns; no Capstone-5 access overrides are needed.

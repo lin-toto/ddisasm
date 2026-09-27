@@ -32,16 +32,15 @@ relations for ARM64.
 // reg_arithmetic_operation to track modification of the index.
 memory_access(AccessType,EA,SrcIndex,DstIndex,DirectReg,BaseReg,"NONE",0,0),
 reg_arithmetic_operation(EA,BaseReg_nn,BaseReg_nn,1,Offset):-
-    instruction(EA,_,_,Operation,Op1,Op2,Op3,0,_,_),
-    instruction_writeback(EA),
+    instruction(EA,_,_,Operation,Op1,Op2,0,0,_,_),
+    instruction_post_index(EA),
     (
-        load_operation(Operation), AccessType = "LOAD", SrcIndex = 1, DstIndex = 3;
-        store_operation(Operation), AccessType = "STORE", SrcIndex = 3, DstIndex = 1
+        load_operation(Operation), AccessType = "LOAD", SrcIndex = 1, DstIndex = 2;
+        store_operation(Operation), AccessType = "STORE", SrcIndex = 2, DstIndex = 1
     ),
-    op_indirect_mapped(Op1,"NONE",BaseReg,"NONE",_,0,_),
+    op_indirect_mapped(Op1,"NONE",BaseReg,"NONE",_,Offset,_),
     reg_nonnull(BaseReg,BaseReg_nn),
-    op_immediate(Op2,Offset,_),
-    op_regdirect_contains_reg(Op3,DirectReg).
+    op_regdirect_contains_reg(Op2,DirectReg).
 
 // immediate - pre-index / writeback
 // LDR <Wt>, [<Xn|SP>, #<pimm>]
@@ -50,6 +49,7 @@ memory_access(AccessType,EA,SrcIndex,DstIndex,DirectReg,BaseReg,"NONE",0,Offset)
 reg_arithmetic_operation(EA,BaseReg_nn,BaseReg_nn,1,Offset):-
     instruction(EA,_,_,Operation,Op1,Op2,0,0,_,_),
     instruction_writeback(EA),
+    !instruction_post_index(EA),
     (
         load_operation(Operation), AccessType = "LOAD", SrcIndex = 1, DstIndex = 2;
         store_operation(Operation), AccessType = "STORE", SrcIndex = 2, DstIndex = 1
@@ -78,7 +78,7 @@ memory_access(AccessType,EA,SrcIndex,DstIndex,DirectReg,BaseReg,"NONE",0,Offset)
 memory_access("LOAD",EA,1,2,DstReg,"NONE","NONE",0,Immediate):-
     instruction(EA,_,_,Operation,Op1,Op2,0,0,_,_),
     load_operation(Operation),
-    op_immediate(Op1,Immediate,_),
+    op_indirect_mapped(Op1,"NONE","NONE","NONE",_,Immediate,_),
     op_regdirect_contains_reg(Op2,DstReg).
 
 // LDR (register)
@@ -101,20 +101,19 @@ memory_access(AccessType,EA,SrcIndex,DstIndex,DirectReg,BaseReg,IndexReg,Mult,0)
 memory_access(AccessType,EA,SrcIndex1,DstIndex1,DirectReg1,BaseReg,"NONE",0,0),
 memory_access(AccessType,EA,SrcIndex2,DstIndex2,DirectReg2,BaseReg,"NONE",0,as(SizeBytes,number)),
 reg_arithmetic_operation(EA,BaseReg_nn,BaseReg_nn,1,Offset):-
-    instruction(EA,_,_,Operation,Op1,Op2,Op3,Op4,_,_),
-    instruction_writeback(EA),
+    instruction(EA,_,_,Operation,Op1,Op2,Op3,0,_,_),
+    instruction_post_index(EA),
     (
         load_operation(Operation), AccessType = "LOAD",
-            SrcIndex1 = 2, SrcIndex2 = 2, DstIndex1 = 1, DstIndex2 = 4;
+            SrcIndex1 = 2, SrcIndex2 = 2, DstIndex1 = 3, DstIndex2 = 1;
         store_operation(Operation), AccessType = "STORE",
-            SrcIndex1 = 1, SrcIndex2 = 4, DstIndex1 = 2, DstIndex2 = 2
+            SrcIndex1 = 3, SrcIndex2 = 1, DstIndex1 = 2, DstIndex2 = 2
     ),
     op_regdirect(Op1,DirectReg2_unmapped),
     op_regdirect_contains_reg(Op1,DirectReg2),
-    op_indirect_mapped(Op2,"NONE",BaseReg,"NONE",_,0,_),
+    op_indirect_mapped(Op2,"NONE",BaseReg,"NONE",_,Offset,_),
     reg_nonnull(BaseReg,BaseReg_nn),
-    op_immediate(Op3,Offset,_),
-    op_regdirect_contains_reg(Op4,DirectReg1),
+    op_regdirect_contains_reg(Op3,DirectReg1),
     register_size_bytes(DirectReg2_unmapped,SizeBytes).
 
 // pair pre-index
@@ -125,11 +124,12 @@ memory_access(AccessType,EA,SrcIndex2,DstIndex2,DirectReg2,BaseReg,"NONE",0,Offs
 reg_arithmetic_operation(EA,BaseReg_nn,BaseReg_nn,1,Offset):-
     instruction(EA,_,_,Operation,Op1,Op2,Op3,0,_,_),
     instruction_writeback(EA),
+    !instruction_post_index(EA),
     (
         load_operation(Operation), AccessType = "LOAD",
-            SrcIndex1 = 2, SrcIndex2 = 2, DstIndex1 = 1, DstIndex2 = 3;
+            SrcIndex1 = 2, SrcIndex2 = 2, DstIndex1 = 3, DstIndex2 = 1;
         store_operation(Operation), AccessType = "STORE",
-            SrcIndex1 = 1, SrcIndex2 = 3, DstIndex1 = 2, DstIndex2 = 2
+            SrcIndex1 = 3, SrcIndex2 = 1, DstIndex1 = 2, DstIndex2 = 2
     ),
     op_regdirect(Op1,DirectReg2_unmapped),
     op_regdirect_contains_reg(Op1,DirectReg2),
@@ -147,9 +147,9 @@ memory_access(AccessType,EA,SrcIndex2,DstIndex2,DirectReg2,BaseReg,"NONE",0,Offs
     !instruction_writeback(EA),
     (
         load_operation(Operation), AccessType = "LOAD",
-            SrcIndex1 = 2, SrcIndex2 = 2, DstIndex1 = 1, DstIndex2 = 3;
+            SrcIndex1 = 2, SrcIndex2 = 2, DstIndex1 = 3, DstIndex2 = 1;
         store_operation(Operation), AccessType = "STORE",
-            SrcIndex1 = 1, SrcIndex2 = 3, DstIndex1 = 2, DstIndex2 = 2
+            SrcIndex1 = 3, SrcIndex2 = 1, DstIndex1 = 2, DstIndex2 = 2
     ),
     op_regdirect(Op1,DirectReg2_unmapped),
     op_regdirect_contains_reg(Op1,DirectReg2),

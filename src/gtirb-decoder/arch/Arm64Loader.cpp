@@ -37,7 +37,7 @@ void Arm64Loader::decode(BinaryFacts& Facts, const uint8_t* Bytes, uint64_t Size
     // Build facts from the current decoder, correcting only verified errors
     // in its access metadata rather than recreating older decoder behavior.
     bool InstAdded = false;
-    if(Count > 0 && capstone_compat::adaptAArch64(*CsHandle, *CsInsn))
+    if(Count > 0)
     {
         fixAArch64Capstone6Accesses(*CsInsn);
         InstAdded = build(Facts, *CsInsn);
@@ -135,9 +135,10 @@ bool Arm64Loader::build(BinaryFacts& Facts, const cs_insn& CsInstruction)
             }
 
             // Populate shift metadata if present.
-            if(CsOp.type == AARCH64_OP_REG && CsOp.shift.value != 0)
+            if(CsOp.type == AARCH64_OP_REG && CsOp.shift.type != AARCH64_SFT_INVALID)
             {
                 std::string ShiftType;
+                bool RegisterShift = false;
                 switch(CsOp.shift.type)
                 {
                     case AARCH64_SFT_LSL:
@@ -155,20 +156,39 @@ bool Arm64Loader::build(BinaryFacts& Facts, const cs_insn& CsInstruction)
                     case AARCH64_SFT_ROR:
                         ShiftType = "ROR";
                         break;
+                    case AARCH64_SFT_LSL_REG:
+                        ShiftType = "LSL";
+                        RegisterShift = true;
+                        break;
+                    case AARCH64_SFT_LSR_REG:
+                        ShiftType = "LSR";
+                        RegisterShift = true;
+                        break;
+                    case AARCH64_SFT_ASR_REG:
+                        ShiftType = "ASR";
+                        RegisterShift = true;
+                        break;
+                    case AARCH64_SFT_ROR_REG:
+                        ShiftType = "ROR";
+                        RegisterShift = true;
+                        break;
                     case AARCH64_SFT_INVALID:
                         std::cerr << "WARNING: instruction has a non-zero invalid shift at " << Addr
                                   << "\n";
                         return false;
                     default:
-                        // Shifts by a register (AARCH64_SFT_*_REG) have no
-                        // op_shifted representation.
                         std::cerr << "WARNING: instruction has an unsupported shift at " << Addr
                                   << "\n";
                         return false;
                 }
-                Facts.Instructions.shiftedOp(
-                    relations::ShiftedOp{Addr, rotated_op_index(i + 1, OpCount),
-                                         static_cast<uint8_t>(CsOp.shift.value), ShiftType});
+                if(RegisterShift)
+                    Facts.Instructions.shiftedWithRegOp(
+                        relations::ShiftedWithRegOp{Addr, rotated_op_index(i + 1, OpCount),
+                                                    registerName(CsOp.shift.value), ShiftType});
+                else
+                    Facts.Instructions.shiftedOp(
+                        relations::ShiftedOp{Addr, rotated_op_index(i + 1, OpCount),
+                                             static_cast<uint8_t>(CsOp.shift.value), ShiftType});
             }
 
             // Populate extend metadata if present. We pass this as a shift type.
@@ -221,9 +241,18 @@ bool Arm64Loader::build(BinaryFacts& Facts, const cs_insn& CsInstruction)
     uint64_t Size(CsInstruction.size);
 
     Facts.Instructions.add(relations::Instruction{Addr, Size, "", Name, OpCodes, 0, 0});
-    if(CsInstruction.detail->writeback)
+    // Capstone's writeback flag also describes tied vector/register operands.
+    // The analysis fact means an addressing-base update, not any tied result.
+    bool HasBase = std::any_of(Details.operands, Details.operands + Details.op_count,
+                              [](const cs_aarch64_op& Op) {
+                                  return Op.type == AARCH64_OP_MEM
+                                         && Op.mem.base != AARCH64_REG_INVALID;
+                              });
+    if(CsInstruction.detail->writeback && HasBase)
     {
         Facts.Instructions.writeback(relations::InstructionWriteback{Addr});
+        if(Details.post_index)
+            Facts.Instructions.postIndex(Addr);
     }
     return true;
 }
@@ -237,6 +266,8 @@ std::optional<relations::Operand> Arm64Loader::build(const cs_insn& CsInsn, uint
     {
         case AARCH64_OP_REG:
             return RegOp{registerName(CsOp.reg, CsOp.is_vreg)};
+        case AARCH64_OP_PRED:
+            return RegOp{registerName(CsOp.pred.reg)};
         case AARCH64_OP_IMM:
         {
             // ARM64 immediate operands do not have a size.
@@ -271,56 +302,43 @@ std::optional<relations::Operand> Arm64Loader::build(const cs_insn& CsInsn, uint
         case AARCH64_OP_FP:
             return FPImmOp{CsOp.fp};
         case AARCH64_OP_CIMM:
-            std::cerr << "WARNING: unsupported CIMM operand\n";
-            break;
+            return SpecialOp{"CIMM", std::to_string(CsOp.imm)};
         case AARCH64_OP_REG_MRS:
         case AARCH64_OP_REG_MSR:
         case AARCH64_OP_SYSREG:
         case AARCH64_OP_SYSALIAS:
+        case AARCH64_OP_SYSIMM:
         {
-            // Capstone 6 reports system registers, PSTATE fields, barrier
-            // options and prefetch operations as system operands.
+            if(CsOp.type == AARCH64_OP_SYSIMM
+               && CsOp.sysop.sub_type == AARCH64_OP_EXACTFPIMM)
+            {
+                switch(CsOp.sysop.imm.exactfpimm)
+                {
+                    case AARCH64_EXACTFPIMM_ZERO: return FPImmOp{0.0};
+                    case AARCH64_EXACTFPIMM_HALF: return FPImmOp{0.5};
+                    case AARCH64_EXACTFPIMM_ONE: return FPImmOp{1.0};
+                    case AARCH64_EXACTFPIMM_TWO: return FPImmOp{2.0};
+                    default: break;
+                }
+                break;
+            }
+            // Keep native system operands distinct from ordinary registers
+            // and address immediates. Their spelling is semantic, not an
+            // instruction-shape adaptation.
             if(CsOp.type == AARCH64_OP_SYSALIAS && CsOp.sysop.sub_type == AARCH64_OP_PRFM)
             {
                 if(std::optional<const char*> Label = prefetchValue(CsOp.sysop.alias.prfm))
                 {
                     return SpecialOp{"prefetch", *Label};
                 }
-                break;
             }
-            switch(capstone_compat::aarch64SystemOperandKind(CsOp))
+            if(CsOp.type == AARCH64_OP_SYSALIAS && CsOp.sysop.sub_type == AARCH64_OP_DB)
             {
-                case capstone_compat::Aarch64SystemOperand::Pstate:
-                {
-                    std::optional<std::string> OpString = operandString(CsInsn, OpIndex);
-                    if(OpString)
-                    {
-                        return SpecialOp{"pstate", *OpString};
-                    }
-                    break;
-                }
-                case capstone_compat::Aarch64SystemOperand::Barrier:
-                {
-                    if(std::optional<const char*> Label = barrierValue(CsOp.sysop.alias.db))
-                    {
-                        return SpecialOp{"barrier", *Label};
-                    }
-                    break;
-                }
-                case capstone_compat::Aarch64SystemOperand::Register:
-                case capstone_compat::Aarch64SystemOperand::None:
-                {
-                    // It seems like capstone only has a subset of system registers
-                    // implemented for printing with cs_reg_name, so we have to parse
-                    // it from the instruction string.
-                    std::optional<std::string> Reg = operandString(CsInsn, OpIndex);
-                    if(Reg)
-                    {
-                        return RegOp{*Reg};
-                    }
-                    break;
-                }
+                if(std::optional<const char*> Label = barrierValue(CsOp.sysop.alias.db))
+                    return SpecialOp{"barrier", *Label};
             }
+            if(auto Spelling = operandString(CsInsn, OpIndex))
+                return SpecialOp{"system", *Spelling};
             break;
         }
         case AARCH64_OP_INVALID:
@@ -446,7 +464,15 @@ std::optional<const char*> barrierValue(const aarch64_db Op)
 
 std::string Arm64Loader::registerName(unsigned int Reg, bool IsVreg) const
 {
-    return capstone_compat::aarch64RegisterName(*CsHandle, Reg, IsVreg);
+    const char* NativeName = cs_reg_name(*CsHandle, Reg);
+    if(!NativeName)
+        return "NONE";
+    std::string Name = uppercase(NativeName);
+    // Q and V are one physical register in the native API; is_vreg chooses
+    // vector spelling. X29/X30 and all other native names stay unchanged.
+    if(IsVreg && !Name.empty() && std::string("BHSDQ").find(Name[0]) != std::string::npos)
+        Name[0] = 'V';
+    return Name;
 }
 
 void Arm64Loader::registerAccesses(const cs_insn& CsInstruction, std::vector<std::string>& Reads,

@@ -56,8 +56,7 @@ private:
                                             const cs_aarch64_op& CsOp);
     bool build(BinaryFacts& Facts, const cs_insn& CsInstruction);
     std::optional<std::string> operandString(const cs_insn& CsInsn, uint8_t Index);
-    // Register name as the facts spell it (Capstone 5.0.1's names: FP and LR
-    // for X29 and X30, V<n> for vector operands, NONE for no register).
+    // Native register spelling, V<n> for vector operands, NONE for no register.
     std::string registerName(unsigned int Reg, bool IsVreg = false) const;
 };
 
