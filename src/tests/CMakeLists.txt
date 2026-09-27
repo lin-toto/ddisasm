@@ -18,6 +18,7 @@ add_executable(
   ElfReader.Test.cpp
   RawReader.Test.cpp
   CompositeLoader.Test.cpp
+  CapstoneAccess.Test.cpp
   ArchiveReader.Test.cpp
   InstructionRelations.Test.cpp
   DatalogIO.Test.cpp

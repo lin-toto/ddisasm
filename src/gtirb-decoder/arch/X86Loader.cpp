@@ -161,5 +161,5 @@ void X86Loader::registerAccesses(const cs_insn& CsInstruction, std::vector<std::
                                  std::vector<std::string>& Writes)
 {
     InstructionLoader::registerAccesses(CsInstruction, Reads, Writes);
-    fixX86RegisterAccesses(CsInstruction, Reads, Writes);
+    fixX86Capstone6Accesses(CsInstruction, Reads, Writes);
 }

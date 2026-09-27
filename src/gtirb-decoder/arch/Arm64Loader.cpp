@@ -34,14 +34,12 @@ void Arm64Loader::decode(BinaryFacts& Facts, const uint8_t* Bytes, uint64_t Size
     cs_insn* CsInsn;
     size_t Count = cs_disasm(*CsHandle, Bytes, Size, Addr, 1, &CsInsn);
 
-    // Build datalog instruction facts from Capstone instruction. The adapter
-    // first rewrites Capstone 6's output into the operand shape Capstone 5.0.1
-    // reported, and emulateCapstone5Access its register accesses; everything
-    // below, including loadRegisterAccesses, reads the adapted instruction.
+    // Build facts from the current decoder, correcting only verified errors
+    // in its access metadata rather than recreating older decoder behavior.
     bool InstAdded = false;
     if(Count > 0 && capstone_compat::adaptAArch64(*CsHandle, *CsInsn))
     {
-        emulateCapstone5Access(*CsInsn);
+        fixAArch64Capstone6Accesses(*CsInsn);
         InstAdded = build(Facts, *CsInsn);
     }
 
@@ -456,14 +454,14 @@ void Arm64Loader::registerAccesses(const cs_insn& CsInstruction, std::vector<std
 {
     cs_regs RegsRead, RegsWrite;
     uint8_t RegsReadCount, RegsWriteCount;
-    if(capstone5RegsAccess(*CsHandle, CsInstruction, RegsRead, &RegsReadCount, RegsWrite,
-                           &RegsWriteCount)
+    if(cs_regs_access(*CsHandle, &CsInstruction, RegsRead, &RegsReadCount, RegsWrite,
+                      &RegsWriteCount)
        != CS_ERR_OK)
     {
         assert(!"cs_regs_access failed");
         return;
     }
-    // Capstone 5.0.1 named a register that is a vector operand V<n> here too.
+    // Match the register spelling used for vector operands in the facts.
     const cs_aarch64& Details = CsInstruction.detail->aarch64;
     auto isVreg = [&Details](uint16_t Reg) {
         for(uint8_t i = 0; i < Details.op_count; i++)
