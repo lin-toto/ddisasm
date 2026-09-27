@@ -11,6 +11,48 @@ import gtirb
 @unittest.skipUnless(shutil.which("gcc") and shutil.which("gtirb-pprinter"),
                      "requires x64 ELF compiler and printer")
 class RetainedLocalRelocationsTest(unittest.TestCase):
+    def test_retained_section_calls_and_bss_after_relayout(self):
+        for pie in (False, True):
+            with self.subTest(pie=pie), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source = root / "input.c"
+                source.write_text("""
+                    #include <stdio.h>
+                    static int local_counter;
+                    static const char padding[4096] __attribute__((used)) = "padding";
+                    __attribute__((noinline, noclone)) static void local_callee(void) {
+                        ++local_counter;
+                    }
+                    int main(void) {
+                        local_callee();
+                        local_callee();
+                        printf("counter=%d\\n", local_counter);
+                        return local_counter != 2;
+                    }
+                """)
+                cc = ["gcc", "-O2", "-fPIE" if pie else "-fno-pie",
+                      "-pie" if pie else "-no-pie",
+                      "-Wl,--build-id=none"]
+                original = root / "original"
+                subprocess.run(cc + [str(source), "-Wl,--emit-relocs",
+                                     "-o", str(original)], check=True, capture_output=True)
+                relocations = subprocess.check_output(["readelf", "-Wr", str(original)], text=True)
+                self.assertRegex(relocations, r"R_X86_64_PC32\s+[0-9a-f]+\s+\.text \+")
+                self.assertRegex(relocations, r"R_X86_64_PC32\s+[0-9a-f]+\s+\.bss \+")
+                expected = subprocess.check_output([str(original)], timeout=10)
+                path, assembly = root / "ir.gtirb", root / "output.S"
+                subprocess.run(["ddisasm", str(original), "--ir", str(path), "-j", "1"],
+                               check=True, capture_output=True)
+                subprocess.run(["gtirb-pprinter", "--ir", str(path), "--asm", str(assembly),
+                                "--policy", "complete", "--shared", "no"],
+                               check=True, capture_output=True)
+                rewritten = root / "rewritten"
+                subprocess.run(["gcc", "-nostartfiles", "-no-pie", str(assembly),
+                                "-Wl,--section-start=.text=0x500000",
+                                "-Wl,--section-start=.bss=0x700000", "-o", str(rewritten)],
+                               check=True, capture_output=True)
+                self.assertEqual(subprocess.check_output([str(rewritten)], timeout=10), expected)
+
     def test_nonrelaxable_gotpcrel_cmov_after_relayout(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

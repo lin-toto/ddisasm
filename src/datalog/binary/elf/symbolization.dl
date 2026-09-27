@@ -350,8 +350,6 @@ reloc_type_with_name("GOTPCREL").
 reloc_type_with_name("GOTPCRELX").
 reloc_type_with_name("REX_GOTPCRELX").
 reloc_type_with_name("ABS64").
-reloc_type_with_name("JUMP26").
-reloc_type_with_name("CALL26").
 reloc_type_with_name("JUMP_SLOT").
 
 symbolic_expr_from_relocation(EA,Size/8,Symbol,Addend+Adjustment,TargetEA):-
@@ -371,13 +369,16 @@ Type of relocation possibly with empty Symbol name
 reloc_type_nameless("R32").
 reloc_type_nameless("R64").
 reloc_type_nameless("R32S").
+reloc_type_nameless("ABS64").
 
 // This relocation can have a named symbol or not
 reloc_type_nameless("PC32").
 
 // Relocation indirectly references a named symbol with an offset from a SECTION symbol.
+// Linked images may retain these relocations with --emit-relocs. Their addends
+// are still section-relative, including the instruction's PC adjustment.
 symbolic_expr_from_relocation(EA,Size/8,Symbol,0,TargetEA):-
-    binary_type("REL"),
+    binary_format("ELF"),
     // Nameless relocation referencing a SECTION symbol.
     relocation(EA,Type,"",Addend,SymbolIndex,_,_),
     relocation_size(Type,Size),

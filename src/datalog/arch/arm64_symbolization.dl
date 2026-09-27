@@ -416,20 +416,34 @@ lo_reloc_index("LDST32_ABS_LO12_NC", 1).
 lo_reloc_index("LDST64_ABS_LO12_NC", 1).
 lo_reloc_index("LDST128_ABS_LO12_NC", 1).
 
-symbolic_operand_attribute(EA,OpIndex,"LO12"),
-symbolic_expr_from_relocation(EA,4,Symbol,Addend,Dest):-
-    relocation(EA,RelocType,Symbol,Addend,SymbolIndex,_,"RELA"),
-    lo_reloc_index(RelocType,OpIndex),
-    symbol(SymAddr,_,_,_,_,_,_,SymbolIndex,Symbol),
-    Dest = as(as(SymAddr,number)+Addend,address).
+symbolic_operand_attribute(EA,OpIndex,"LO12"):-
+    relocation(EA,RelocType,_,_,_,_,"RELA"),
+    lo_reloc_index(RelocType,OpIndex).
 
-symbolic_expr_from_relocation(EA,4,Symbol,Addend,Dest):-
-    relocation(EA,RelocType,Symbol,Addend,SymbolIndex,_,"RELA"),
-    (
-        RelocType = "ADR_PREL_PG_HI21";
-        RelocType = "ADR_PREL_PG_HI21_NC"
-    ),
-    symbol(SymAddr,_,_,_,_,_,_,SymbolIndex,Symbol),
+// Instruction relocations occupy four bytes, including CALL26/JUMP26 whose
+// names describe the immediate bit count rather than the relocated width.
+.decl arm64_instruction_relocation(Type:symbol)
+
+arm64_instruction_relocation(Type):- lo_reloc_index(Type,_).
+arm64_instruction_relocation("ADR_PREL_PG_HI21").
+arm64_instruction_relocation("ADR_PREL_PG_HI21_NC").
+arm64_instruction_relocation("CALL26").
+arm64_instruction_relocation("JUMP26").
+
+// Keep a named anchor and its signed addend separately. TargetEA identifies
+// the anchor, so exact symbol lookup must not include the addend a second time.
+symbolic_expr_from_relocation(EA,4,Symbol,Addend,SymAddr):-
+    relocation(EA,Type,Symbol,Addend,SymbolIndex,_,"RELA"),
+    arm64_instruction_relocation(Type),
+    Symbol != "",
+    symbol(SymAddr,_,_,_,_,_,_,SymbolIndex,Symbol).
+
+// An unnamed section anchor is replaced by a symbol at its resolved target.
+// The section-relative addend has already been consumed in that resolution.
+symbolic_expr_from_relocation(EA,4,"",0,Dest):-
+    relocation(EA,Type,"",Addend,SymbolIndex,_,"RELA"),
+    arm64_instruction_relocation(Type),
+    symbol(SymAddr,_,"SECTION",_,_,_,_,SymbolIndex,""),
     Dest = as(as(SymAddr,number)+Addend,address).
 
 value_reg(EA,Reg,EA,"NONE",0,Val,1):-

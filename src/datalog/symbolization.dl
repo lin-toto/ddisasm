@@ -258,8 +258,11 @@ symbolic_operand_candidate(EA,Op_index,Dest,Type):-
         ;
         instruction_displacement_offset(EA,Op_index,Offset,_)
     ),
-    relocation(EA+Offset,_,Symbol,Addend,_,_,_),
-    symbol(SymbolAddr,_,_,_,_,_,_,_,Symbol),
+    relocation(EA+Offset,_,Symbol,Addend,SymbolIndex,_,_),
+    symbol(SymbolAddr,_,SymbolType,_,_,_,_,SymbolIndex,Symbol),
+    // Unnamed section symbols are resolved by symbolic_expr_from_relocation;
+    // name-only matching would confuse every section with the same empty name.
+    SymbolType != "SECTION",
     Dest = as(as(SymbolAddr,number)+Addend,address),
     (
         code(Dest), Type = "code"
