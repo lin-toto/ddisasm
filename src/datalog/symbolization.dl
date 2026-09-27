@@ -2584,6 +2584,15 @@ symbolic_expr(EA,Size,Symbol,Offset):-
     // Empty symbols must have a symbol name inferred.
     Symbol != "".
 
+// Retained relocations can name distinct local definitions with the same
+// spelling. The relocation lookup already selected an exact symbol address;
+// do not discard that identity when materializing the expression. Imports
+// without a definition intentionally retain name/version-based forwarding.
+symbolic_expr_symbol_address(EA,1,Symbol,TargetEA):-
+    symbolic_expr_from_relocation(EA,_,Symbol,_,TargetEA),
+    Symbol != "",
+    defined_symbol(TargetEA,_,_,_,_,_,_,_,Symbol).
+
 symbolic_expr(EA,Size,Symbol,Offset),
 symbolic_expr_symbol_address(EA,1,Symbol,TargetEA):-
     symbolic_expr_from_relocation(EA,Size,"",Offset,TargetEA),
