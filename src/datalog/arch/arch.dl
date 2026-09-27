@@ -254,7 +254,7 @@ jump(EA):-
     jump_operation(Operation),
     !arch.return(EA).
 
-.decl call(EA:address,DestOperandIndex:operand_index)
+.decl call(EA:address,DestOperandIndex:operand_index) overridable
 
 call(EA,DestOperandIndex):-
     instruction_get_operation(EA,Operation),

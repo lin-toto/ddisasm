@@ -102,10 +102,10 @@ direct_call(EA,Dest):-
     arch.call(EA,_),
     riscv_relocation_target(EA,Dest).
 
-direct_call(EA,as(as(EA,number)+Offset,address)):-
+direct_call(EA,as(Target,address)):-
     arch.call(EA,Index),
     instruction_get_op(EA,Index,Op),
-    op_immediate(Op,Offset,_),
+    op_immediate(Op,Target,_),
     !riscv_pcrel_control_transfer(_,EA,_,_),
     !instruction_has_relocation(EA,_).
 
@@ -113,12 +113,12 @@ direct_jump(EA,Dest):-
     arch.jump(EA),
     riscv_relocation_target(EA,Dest).
 
-direct_jump(EA,as(as(EA,number)+Offset,address)):-
+direct_jump(EA,as(Target,address)):-
     arch.jump(EA),
     instruction_get_operation(EA,Operation),
     arch.jump_operation_op_index(Operation,Index),
     instruction_get_op(EA,Index,Op),
-    op_immediate(Op,Offset,_),
+    op_immediate(Op,Target,_),
     !riscv_pcrel_control_transfer(_,EA,_,_),
     !instruction_has_relocation(EA,_).
 
@@ -194,18 +194,16 @@ riscv_pcrel_control_transfer(EAHi,EALo,2,Dest):-
     instruction_get_operation(EALo,"JALR"),
     instruction_get_op(EALo,2,ImmOp),
     op_immediate(ImmOp,Offset,_),
-    instruction_get_op(EALo,3,RegOp),
+    instruction_get_op(EALo,1,RegOp),
     op_regdirect_contains_reg(RegOp,Reg),
     Dest = as(as(Base,number)+Offset,address).
 
-// Zero-offset JR/JALR aliases, including their compressed encodings, expose
-// only the base register. They still need a symbolic low half: after relayout
+// Compressed zero-offset transfers expose only the base register. They
+// still need a symbolic low half: after relayout
 // the target need not remain at the AUIPC page offset, and the printer must
 // expand a compressed transfer to an ordinary JALR when necessary.
 .decl riscv_zero_offset_transfer_operation(Operation:symbol)
 
-riscv_zero_offset_transfer_operation("JALR").
-riscv_zero_offset_transfer_operation("JR").
 riscv_zero_offset_transfer_operation("C.JALR").
 riscv_zero_offset_transfer_operation("C.JR").
 
@@ -217,16 +215,6 @@ riscv_pcrel_control_transfer(EAHi,EALo,1,Dest):-
     instruction(EALo,_,_,Operation,RegOp,0,0,0,_,_),
     riscv_zero_offset_transfer_operation(Operation),
     op_regdirect_contains_reg(RegOp,Reg).
-
-riscv_pcrel_control_transfer(EAHi,EALo,2,Dest):-
-    riscv_auipc(EAHi,Reg,Base),
-    next(EAHi,EALo),
-    instruction_get_operation(EALo,"JR"),
-    instruction_get_op(EALo,2,ImmOp),
-    op_immediate(ImmOp,Offset,_),
-    instruction_get_op(EALo,1,RegOp),
-    op_regdirect_contains_reg(RegOp,Reg),
-    Dest = as(as(Base,number)+Offset,address).
 
 .decl riscv_lui(EA:address,Reg:register,Base:address)
 

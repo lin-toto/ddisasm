@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "../gtirb-decoder/arch/Arm64Loader.h"
+#include "../gtirb-decoder/arch/RiscVLoader.h"
 #include "../gtirb-decoder/arch/X64Loader.h"
 
 namespace
@@ -12,12 +13,21 @@ namespace
 template <typename Loader> class ExposedLoader : public Loader
 {
 public:
+    using Loader::Loader;
     using Loader::decode;
 };
 
 template <typename Loader> BinaryFacts decode(std::initializer_list<uint8_t> Bytes)
 {
     ExposedLoader<Loader> L;
+    BinaryFacts Facts;
+    L.decode(Facts, Bytes.begin(), Bytes.size(), 0x10000);
+    return Facts;
+}
+
+BinaryFacts decodeRiscv(std::initializer_list<uint8_t> Bytes)
+{
+    ExposedLoader<RiscVLoader> L(RiscVLoader::XLen::RV64);
     BinaryFacts Facts;
     L.decode(Facts, Bytes.begin(), Bytes.size(), 0x10000);
     return Facts;
@@ -105,4 +115,53 @@ TEST(CapstoneAccess, X64CompareExchangePairs)
                   Wide ? (std::set<std::string>{"RAX", "RDX", "RFLAGS"})
                        : (std::set<std::string>{"EAX", "EDX", "RFLAGS"}));
     }
+}
+
+TEST(CapstoneAccess, RiscVNativeControlFlowAndCsrOperands)
+{
+    const auto Call = decodeRiscv({0xef, 0x00, 0x80, 0x00}); // jal ra,+8
+    ASSERT_EQ(Call.Instructions.instructions().size(), 1);
+    EXPECT_EQ(Call.Instructions.instructions()[0].Name, "JAL");
+    ASSERT_EQ(Call.Operands.imm().size(), 1);
+    // Native Capstone 6 branch operands are absolute targets.
+    EXPECT_EQ(Call.Operands.imm().begin()->first.Value, 0x10008);
+    EXPECT_EQ(registers(Call, "W"), (std::set<std::string>{"RA"}));
+    const auto Tail = decodeRiscv({0x67, 0x00, 0x83, 0x00}); // jalr zero,8(t1)
+    ASSERT_EQ(Tail.Instructions.instructions().size(), 1);
+    EXPECT_EQ(Tail.Instructions.instructions()[0].Name, "JALR");
+    EXPECT_EQ(Tail.Instructions.instructions()[0].OpCodes.size(), 3);
+
+    const auto Csr = decodeRiscv({0x73, 0x25, 0x10, 0x00}); // csrrs a0,fflags,zero
+    ASSERT_EQ(Csr.Instructions.instructions().size(), 1);
+    EXPECT_EQ(Csr.Instructions.instructions()[0].Name, "CSRRS");
+    ASSERT_EQ(Csr.Operands.special().size(), 1);
+    EXPECT_EQ(Csr.Operands.special().begin()->first.Type, "CSR");
+    EXPECT_EQ(Csr.Operands.special().begin()->first.Value, "1");
+    EXPECT_EQ(registers(Csr, "W"), (std::set<std::string>{"A0"}));
+}
+
+TEST(CapstoneAccess, RiscVCompressedAndAtomicAccesses)
+{
+    const auto Add = decodeRiscv({0x2e, 0x95}); // c.add a0,a1
+    EXPECT_EQ(registers(Add, "R"), (std::set<std::string>{"A0", "A1"}));
+    EXPECT_EQ(registers(Add, "W"), (std::set<std::string>{"A0"}));
+    const auto Stack = decodeRiscv({0x08, 0x08}); // c.addi4spn a0,sp,16
+    EXPECT_EQ(registers(Stack, "R"), (std::set<std::string>{"SP"}));
+    EXPECT_EQ(Stack.Instructions.instructions()[0].OpCodes.size(), 3);
+    const auto Call = decodeRiscv({0x82, 0x90}); // c.jalr ra
+    EXPECT_EQ(registers(Call, "R"), (std::set<std::string>{"RA"}));
+    EXPECT_EQ(registers(Call, "W"), (std::set<std::string>{"RA"}));
+    const auto Store = decodeRiscv({0x2f, 0x25, 0xb6, 0x18}); // sc.w a0,a1,(a2)
+    EXPECT_EQ(registers(Store, "R"), (std::set<std::string>{"A1", "A2"}));
+    EXPECT_EQ(registers(Store, "W"), (std::set<std::string>{"A0"}));
+    ASSERT_EQ(Store.Operands.indirect().size(), 1);
+    EXPECT_EQ(Store.Operands.indirect().begin()->first.Size, 4);
+    for(const auto& Access : Store.Instructions.opAccess())
+    {
+        if(Access.Index == 1)
+            EXPECT_EQ(Access.Mode, "W");
+    }
+    const auto Amo = decodeRiscv({0x2f, 0x25, 0xb6, 0x0e}); // amoswap.w.aqrl
+    ASSERT_EQ(Amo.Operands.indirect().size(), 1);
+    EXPECT_EQ(Amo.Operands.indirect().begin()->first.Size, 4);
 }

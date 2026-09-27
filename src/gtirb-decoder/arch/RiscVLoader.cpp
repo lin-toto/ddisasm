@@ -20,21 +20,6 @@
 #include <string>
 #include <vector>
 
-namespace
-{
-bool isCompressedLoad(const std::string& Name)
-{
-    return Name == "C.LW" || Name == "C.LWSP" || Name == "C.LD" || Name == "C.LDSP"
-           || Name == "C.FLW" || Name == "C.FLWSP" || Name == "C.FLD" || Name == "C.FLDSP";
-}
-
-bool isCompressedStore(const std::string& Name)
-{
-    return Name == "C.SW" || Name == "C.SWSP" || Name == "C.SD" || Name == "C.SDSP"
-           || Name == "C.FSW" || Name == "C.FSWSP" || Name == "C.FSD" || Name == "C.FSDSP";
-}
-} // namespace
-
 void RiscVLoader::load(const gtirb::Module&, const gtirb::ByteInterval& ByteInterval,
                        BinaryFacts& Facts)
 {
@@ -65,13 +50,11 @@ uint64_t RiscVLoader::decodeInstruction(BinaryFacts& Facts, const uint8_t* Bytes
     cs_insn* CsInsn;
     size_t Count = cs_disasm(*CsHandle, Bytes, Size, Addr, 1, &CsInsn);
 
-    // Build datalog instruction facts from Capstone instruction. The adapter
-    // rewrites Capstone 6's output into the shape Capstone 5.0.1 produced and
-    // rejects what Capstone 5.0.1 did not decode, which is then treated as a
-    // failed decode.
+    // Consume native real-instruction details, including CSR operands,
+    // absolute branch targets and compressed memory operands.
     std::optional<relations::Instruction> Instruction;
     uint64_t InstructionSize = MinInstructionSize;
-    if(Count > 0 && capstone_compat::adaptRiscv(*CsHandle, *CsInsn))
+    if(Count > 0)
     {
         Instruction = build(Facts, *CsInsn);
         InstructionSize = CsInsn->size;
@@ -81,8 +64,7 @@ uint64_t RiscVLoader::decodeInstruction(BinaryFacts& Facts, const uint8_t* Bytes
     {
         Facts.Instructions.add(*Instruction);
 
-        // Capstone 5.0.1 does not provide RISC-V operand access metadata.
-        // Accesses are modeled in datalog, like MIPS.
+        loadRegisterAccesses(Facts, Addr, *CsInsn);
     }
     else
     {
@@ -100,57 +82,19 @@ std::optional<relations::Instruction> RiscVLoader::build(BinaryFacts& Facts,
     std::string Name = uppercase(CsInstruction.mnemonic);
     std::vector<uint64_t> OpCodes;
 
-    if((Name == "JAL" || Name == "JALR") && Details.op_count > 0
-       && Details.operands[0].type == RISCV_OP_REG && Details.operands[0].reg == RISCV_REG_X0)
+    for(int i = 0; i < Details.op_count; i++)
     {
-        Name = (Name == "JAL") ? "J" : "JR";
+        std::optional<relations::Operand> Op = build(Details.operands[i], Name);
+        if(!Op)
+        {
+            return std::nullopt;
+        }
+        OpCodes.push_back(Facts.Operands.add(*Op));
     }
-
-    if(Name != "NOP" && Name != "C.NOP")
+    // The fact schema puts the first printed operand last on every ISA.
+    if(!OpCodes.empty())
     {
-        int OpCount = Details.op_count;
-        if((isCompressedLoad(Name) || isCompressedStore(Name)) && OpCount == 3
-           && Details.operands[0].type == RISCV_OP_REG
-           && Details.operands[1].type == RISCV_OP_IMM
-           && Details.operands[2].type == RISCV_OP_REG)
-        {
-            using namespace relations;
-
-            const cs_riscv_op& RegOp = Details.operands[0];
-            const cs_riscv_op& DispOp = Details.operands[1];
-            const cs_riscv_op& BaseOp = Details.operands[2];
-
-            IndirectOp MemOp{registerName(RISCV_REG_INVALID),
-                             registerName(BaseOp.reg),
-                             registerName(RISCV_REG_INVALID),
-                             1,
-                             DispOp.imm,
-                             memoryAccessSize(Name)};
-            OpCodes.push_back(Facts.Operands.add(MemOp));
-            OpCodes.push_back(Facts.Operands.add(relations::RegOp{registerName(RegOp.reg)}));
-        }
-        else
-        {
-            for(int i = 0; i < OpCount; i++)
-            {
-                const cs_riscv_op& CsOp = Details.operands[i];
-
-                std::optional<relations::Operand> Op = build(CsOp, Name);
-                if(!Op)
-                {
-                    return std::nullopt;
-                }
-
-                uint64_t OpIndex = Facts.Operands.add(*Op);
-                OpCodes.push_back(OpIndex);
-            }
-
-            // Put the destination operand at the end of the operand list.
-            if(OpCount > 0)
-            {
-                std::rotate(OpCodes.begin(), OpCodes.begin() + 1, OpCodes.end());
-            }
-        }
+        std::rotate(OpCodes.begin(), OpCodes.begin() + 1, OpCodes.end());
     }
 
     gtirb::Addr Addr(CsInstruction.address);
@@ -169,6 +113,10 @@ std::optional<relations::Operand> RiscVLoader::build(const cs_riscv_op& CsOp,
             return RegOp{registerName(CsOp.reg)};
         case RISCV_OP_IMM:
             return ImmOp{CsOp.imm, PointerSize};
+        case RISCV_OP_CSR:
+            return SpecialOp{"CSR", std::to_string(CsOp.csr)};
+        case RISCV_OP_FP:
+            return FPImmOp{CsOp.dimm};
         case RISCV_OP_MEM:
             return IndirectOp{registerName(RISCV_REG_INVALID),
                               registerName(CsOp.mem.base),
@@ -190,6 +138,14 @@ std::string RiscVLoader::registerName(unsigned int Reg) const
 
 uint8_t RiscVLoader::memoryAccessSize(const std::string& Name) const
 {
+    // Acquire/release ordering suffixes do not change an atomic's data width.
+    auto Dot = Name.rfind('.');
+    if(Dot != std::string::npos)
+    {
+        const auto Suffix = Name.substr(Dot);
+        if(Suffix == ".AQ" || Suffix == ".RL" || Suffix == ".AQRL")
+            return memoryAccessSize(Name.substr(0, Dot));
+    }
     if(Name == "LB" || Name == "LBU" || Name == "SB")
     {
         return 1;
@@ -231,8 +187,23 @@ uint8_t RiscVLoader::operandCount(const cs_insn& CsInstruction)
     return Details.op_count;
 }
 
-uint8_t RiscVLoader::operandAccess(const cs_insn&, uint64_t)
+uint8_t RiscVLoader::operandAccess(const cs_insn& CsInstruction, uint64_t Index)
 {
-    // RISC-V does not provide operand access information in Capstone 5.0.1.
-    return CS_AC_INVALID;
+    const auto& Op = CsInstruction.detail->riscv.operands[Index];
+    // Alpha11 marks SC's memory operand read/write. SC writes conditionally;
+    // unlike an AMO, it does not load the previous memory value.
+    if(Op.type == RISCV_OP_MEM && std::string(CsInstruction.mnemonic).rfind("sc.", 0) == 0)
+        return CS_AC_WRITE;
+    return Op.access;
+}
+
+void RiscVLoader::registerAccesses(const cs_insn& CsInstruction,
+                                  std::vector<std::string>& Reads,
+                                  std::vector<std::string>& Writes)
+{
+    InstructionLoader::registerAccesses(CsInstruction, Reads, Writes);
+    // Alpha11's RISCV_reg_access only visits explicit operands. These two
+    // compressed calls have an implicit link-register result.
+    if(CsInstruction.id == RISCV_INS_C_JAL || CsInstruction.id == RISCV_INS_C_JALR)
+        Writes.push_back(registerName(RISCV_REG_X1));
 }

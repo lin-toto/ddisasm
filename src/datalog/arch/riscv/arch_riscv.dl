@@ -153,17 +153,37 @@ syscall_operation("ECALL").
 halt_operation("EBREAK").
 halt_operation("C.EBREAK").
 
-return_operation("RET").
+// Native JAL/JALR retain the link destination; rd=zero is a jump, not a
+// call. Only a zero-offset jump through RA is a return.
+.override return
+return(EA):-
+    instruction_get_operation(EA,"C.JR"),
+    instruction_get_op(EA,1,Op),
+    op_regdirect_contains_reg(Op,"RA").
 
 return(EA):-
+    instruction(EA,_,_,"JALR",Base,Offset,Dest,0,_,_),
+    op_regdirect_contains_reg(Base,"RA"),
+    op_regdirect_contains_reg(Dest,"ZERO"),
+    op_immediate(Offset,0,_).
+
+.override call
+call(EA,1):-
     instruction_get_operation(EA,Operation),
+    (Operation = "C.JAL"; Operation = "C.JALR").
+
+call(EA,1):-
     (
-        Operation = "JR";
-        Operation = "C.JR"
+        instruction(EA,_,_,"JAL",_,Dest,0,0,_,_);
+        instruction(EA,_,_,"JALR",_,_,Dest,0,_,_)
     ),
-    arch.jump_operation_op_index(Operation,Index),
-    instruction_get_op(EA,Index,Op),
-    op_regdirect_contains_reg(Op,"RA").
+    op_regdirect_contains_reg(Dest,Reg), Reg != "ZERO".
+
+.override jump
+jump(EA):-
+    instruction_get_operation(EA,Operation),
+    jump_operation(Operation),
+    !call(EA,_), !return(EA).
 
 cmp_operation(Operation):-
     branch_operation(Operation,_).
@@ -289,9 +309,10 @@ reg_arithmetic_operation(EA,Dst,Dst,1,Immediate):-
     op_immediate(Op1,Immediate,_).
 
 reg_arithmetic_operation(EA,Dst,"SP",1,Immediate):-
-    instruction(EA,_,_,"C.ADDI4SPN",Op1,Op2,0,0,_,_),
-    op_regdirect_contains_reg(Op2,Dst),
-    op_immediate(Op1,Immediate,_).
+    instruction(EA,_,_,"C.ADDI4SPN",Op1,Op2,Op3,0,_,_),
+    op_regdirect_contains_reg(Op1,"SP"),
+    op_regdirect_contains_reg(Op3,Dst),
+    op_immediate(Op2,Immediate,_).
 
 // SLLI <Dst> <Src> <Immediate>
 reg_arithmetic_operation(EA,Dst,Src,2^Immediate,0):-
@@ -355,75 +376,9 @@ reg_imm_bitwise_binary_op(EA,Dst,Src,Imm,Op):-
     op_regdirect_contains_reg(Op1,Src),
     op_immediate(Op2,Imm,_).
 
-// Capstone 5.0.1 does not support register/operand access metadata for
-// RISC-V, so we model operand access here.
-
-op_access_override(EA,Index,"R",1):-
-    arch.memory_access(_,EA,Index,_,_,_,_,_,_).
-
-op_access_override(EA,Index,"R",1):-
-    instruction_get_operation(EA,Operation),
-    arch.jump_operation(Operation),
-    instruction_get_op(EA,Index,_).
-
-op_access_override(EA,Index,"R",1):-
-    (
-        instruction(EA,_,_,Operation,Op,_,_,_,_,_), Op != 0, Index = 1;
-        instruction(EA,_,_,Operation,_,Op,Op3,_,_,_), Op != 0, Op3 != 0, Index = 2;
-        instruction(EA,_,_,Operation,_,_,Op,Op4,_,_), Op != 0, Op4 != 0, Index = 3
-        ;
-        instruction_get_operation(EA,Operation),
-        in_place_operation(Operation),
-        (
-            instruction(EA,_,_,Operation,_,Op,0,0,_,_), Op != 0, Index = 2;
-            instruction(EA,_,_,Operation,_,_,Op,0,_,_), Op != 0, Index = 3;
-            instruction(EA,_,_,Operation,_,_,_,Op,_,_), Op != 0, Index = 4
-        )
-    ),
-    instruction_get_operation(EA,Operation),
-    !arch.memory_access(_,EA,_,_,_,_,_,_,_),
-    !arch.jump_operation(Operation).
-
-op_access_override(EA,DstIndex,"W",1):-
-    arch.memory_access(_,EA,_,DstIndex,_,_,_,_,_).
-
-op_access_override(EA,Index,"W",1):-
-    instruction_get_operation(EA,Operation),
-    !arch.memory_access(_,EA,_,_,_,_,_,_,_),
-    !arch.jump_operation(Operation),
-    (
-        instruction(EA,_,_,Operation,_,Op2,Op3,Op4,_,_),
-        Op4 = 0,
-        Op3 = 0,
-        Op2 != 0,
-        Index = 2
-        ;
-        instruction(EA,_,_,Operation,_,_,Op3,Op4,_,_),
-        Op4 = 0,
-        Op3 != 0,
-        Index = 3
-        ;
-        instruction(EA,_,_,Operation,_,_,_,Op4,_,_),
-        Op4 != 0,
-        Index = 4
-    ).
-
-register_access_override(EA,Reg,Access,1):-
-    op_access_override(EA,Index,Access,1),
-    instruction_get_op(EA,Index,Op),
-    op_regdirect_contains_reg(Op,Reg).
-
-register_access_override(EA,Reg,"R",1):-
-    instruction_get_op(EA,_,Op),
-    op_indirect_contains_reg(Op,Reg).
-
-register_access_override(EA,"RA","W",1):-
-    instruction(EA,_,_,Operation,_,0,0,0,_,_),
-    (
-        Operation = "JAL";
-        Operation = "C.JAL";
-        Operation = "JALR";
-        Operation = "C.JALR"
-    ).
+// Capstone 6 supplies native operand and register access facts. The loader
+// corrects only its missing implicit compressed-call result and SC memory
+// access; blanket destination-last guesses are unnecessary and incorrect for
+// branches, stores, CSR operations and atomics.
 
 }

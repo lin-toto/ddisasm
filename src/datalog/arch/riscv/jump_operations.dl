@@ -35,9 +35,9 @@ branch_operation_3op("BGE").
 branch_operation_3op("BLTU").
 branch_operation_3op("BGEU").
 
-jump_operation("J").
+jump_operation("JAL").
 jump_operation("C.J").
-jump_operation("JR").
+jump_operation("JALR").
 jump_operation("C.JR").
 
 jump_operation(Operation),

@@ -40,8 +40,7 @@ public:
           PointerSize{static_cast<uint8_t>(XLen0 == XLen::RV32 ? 4 : 8)}
     {
         // Setup Capstone engine: RV32GC or RV64GC with real (non-alias)
-        // syntax and details, the configuration capstone_compat::adaptRiscv
-        // expects (gtirb-pprinter uses the same one).
+        // syntax and native operand details, shared with gtirb-pprinter.
         [[maybe_unused]] cs_err Err =
             capstone_compat::openRiscv(XLen0 == XLen::RV64, false, CsHandle.get());
         assert(Err == CS_ERR_OK && "Failed to initialize RISC-V disassembler.");
@@ -53,6 +52,8 @@ protected:
     void decode(BinaryFacts& Facts, const uint8_t* Bytes, uint64_t Size, uint64_t Addr) override;
     uint8_t operandCount(const cs_insn& CsInstruction) override;
     uint8_t operandAccess(const cs_insn& CsInstruction, uint64_t Index) override;
+    void registerAccesses(const cs_insn& CsInstruction, std::vector<std::string>& Reads,
+                          std::vector<std::string>& Writes) override;
 
 private:
     std::optional<relations::Operand> build(const cs_riscv_op& CsOp, const std::string& Name);
