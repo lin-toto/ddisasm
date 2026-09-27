@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "Arm64PageReferences.h"
 
+#include <algorithm>
 #include <bitset>
 #include <cstdlib>
 #include <map>
@@ -37,10 +38,15 @@ struct Instruction
     uint64_t Address;
     std::bitset<31> Writes;
     bool Call;
+    std::bitset<31> Reads;
+    std::bitset<31> LowValueReads;
     int LowRegister = -1;
     uint64_t LowOffset = 0;
+    bool GotLoad = false;
     int PageRegister = -1;
     uint64_t Page = 0;
+    int ExactRegister = -1;
+    uint64_t ExactAddress = 0;
 };
 
 struct BlockState
@@ -137,6 +143,113 @@ std::optional<PageDefinition> reachingDefinition(
     // A closed cycle with no establishing definition is not evidence.
     return Found;
 }
+
+// GNU ld's Cortex-A53 843419 workaround can replace a page ADRP at 0xff8
+// or 0xffc with ADR. If that page lies outside an object, early symbolization
+// leaves the ADR numeric and describes its tail as target - integral_page.
+// Keep genuine exact ADR bases unchanged: only canonicalize this page-only
+// use when every read agrees and the base is killed before leaving the block.
+void restoreRelaxedPages(gtirb::Module& Module,
+                         std::map<const gtirb::CodeBlock*, BlockState>& States)
+{
+    if(Module.getFileFormat() != gtirb::FileFormat::ELF)
+        return;
+    for(auto& [Block, State] : States)
+    {
+        if(!State.Complete)
+            continue;
+        for(size_t I = 0; I < State.Instructions.size(); ++I)
+        {
+            auto& High = State.Instructions[I];
+            uint64_t WithinPage = High.Address & 4095;
+            if(High.ExactRegister < 0 || (High.ExactAddress & 4095)
+               || (WithinPage != 0xff8 && WithinPage != 0xffc)
+               || expression(*Block, High.Address))
+                continue;
+            int Register = High.ExactRegister;
+            gtirb::Symbol* Symbol = nullptr;
+            int64_t Addend = 0;
+            std::vector<size_t> Uses;
+            bool Killed = false;
+            for(size_t J = I + 1; J < State.Instructions.size(); ++J)
+            {
+                const auto& Low = State.Instructions[J];
+                if(Low.Call)
+                    break;
+                if(Low.Reads[Register])
+                {
+                    const auto* Expr = expression(*Block, Low.Address);
+                    const auto* Difference = Expr ? std::get_if<gtirb::SymAddrAddr>(Expr) : nullptr;
+                    if(Low.LowRegister != Register || Low.LowValueReads[Register]
+                       || !Difference || Difference->Scale != 1
+                       || !Difference->Attributes.empty() || Difference->Sym2->hasReferent()
+                       || !Difference->Sym1->getAddress() || !Difference->Sym2->getAddress()
+                       || uint64_t(*Difference->Sym2->getAddress()) != High.ExactAddress
+                       || uint64_t(*Difference->Sym1->getAddress()) + Difference->Offset
+                              != High.ExactAddress + Low.LowOffset
+                       || (Symbol && (Symbol != Difference->Sym1 || Addend != Difference->Offset)))
+                        break;
+                    Symbol = Difference->Sym1;
+                    Addend = Difference->Offset;
+                    Uses.push_back(J);
+                }
+                if(Low.Writes[Register])
+                {
+                    Killed = true;
+                    break;
+                }
+            }
+            if(!Killed || Uses.empty())
+                continue;
+
+            gtirb::SymAttributeSet HighAttributes;
+            // A known forwarded GOT slot denotes the ultimate symbol for the
+            // printer. Ordinary relocated pointers in .data must not acquire
+            // GOT semantics merely because they contain an address.
+            if(auto* Data = Symbol->getReferent<gtirb::DataBlock>())
+            {
+                const auto* Section = Data->getByteInterval()->getSection();
+                const auto* Forwarding = Module.getAuxData<gtirb::schema::SymbolForwarding>();
+                if(Section && (Section->getName() == ".got" || Section->getName() == ".got.plt")
+                   && Forwarding && Forwarding->count(Symbol->getUUID()))
+                {
+                    // The GOT low relocation is LD64_GOT_LO12_NC. It is not
+                    // valid for a 32-bit load, a store, or an address ADD.
+                    if(Addend != 0 || std::any_of(Uses.begin(), Uses.end(),
+                           [&](size_t J) { return !State.Instructions[J].GotLoad; }))
+                        continue;
+                    HighAttributes.insert(gtirb::SymAttribute::GOT);
+                }
+            }
+            auto* Interval = const_cast<gtirb::CodeBlock*>(Block)->getByteInterval();
+            uint64_t Offset = High.Address - uint64_t(*Interval->getAddress());
+            int64_t Delta = int64_t(High.ExactAddress >> 12) - int64_t(High.Address >> 12);
+            uint32_t Word = 0x90000000 | (uint32_t(Delta) & 3) << 29
+                            | ((uint32_t(Delta) >> 2) & 0x7ffff) << 5 | Register;
+            for(unsigned Byte = 0; Byte != 4; ++Byte)
+                Interval->rawBytes<uint8_t>()[Offset + Byte] = (Word >> (Byte * 8)) & 255;
+            Interval->addSymbolicExpression<gtirb::SymAddrConst>(
+                Offset, Addend, Symbol, HighAttributes);
+            auto LowAttributes = HighAttributes;
+            LowAttributes.insert(gtirb::SymAttribute::LO12);
+            for(size_t J : Uses)
+            {
+                uint64_t LowOffset = State.Instructions[J].Address - uint64_t(*Interval->getAddress());
+                Interval->addSymbolicExpression<gtirb::SymAddrConst>(
+                    LowOffset, Addend, Symbol, LowAttributes);
+                if(auto* Sizes = Module.getAuxData<gtirb::schema::SymbolicExpressionSizes>())
+                    (*Sizes)[gtirb::Offset(Interval->getUUID(), LowOffset)] = 4;
+            }
+            if(auto* Sizes = Module.getAuxData<gtirb::schema::SymbolicExpressionSizes>())
+                (*Sizes)[gtirb::Offset(Interval->getUUID(), Offset)] = 4;
+            // The same pass next visits other users; keep its decoded state
+            // coherent with the changed bytes, not a stale exact ADR.
+            High.PageRegister = Register;
+            High.Page = High.ExactAddress;
+            High.ExactRegister = -1;
+        }
+    }
+}
 } // namespace
 
 void completeArm64PageReferences(gtirb::Module& Module)
@@ -166,12 +279,18 @@ void completeArm64PageReferences(gtirb::Module& Module)
             uint8_t ReadCount, WriteCount;
             if(cs_regs_access(Handle, &Insn, Read, &ReadCount, Written, &WriteCount) == CS_ERR_OK)
             {
+                for(unsigned J = 0; J < ReadCount; ++J)
+                    if(int Register = registerNumber(Handle, Read[J]); Register >= 0)
+                        Info.Reads.set(Register);
                 for(unsigned J = 0; J < WriteCount; ++J)
                     if(int Register = registerNumber(Handle, Written[J]); Register >= 0)
                         Info.Writes.set(Register);
             }
             else
+            {
+                Info.Reads.set();
                 Info.Writes.set();
+            }
             const auto& A = Insn.detail->aarch64;
             if(Insn.id == AARCH64_INS_ADRP && A.op_count == 2
                && A.operands[0].type == AARCH64_OP_REG && A.operands[1].type == AARCH64_OP_IMM)
@@ -179,8 +298,15 @@ void completeArm64PageReferences(gtirb::Module& Module)
                 Info.PageRegister = registerNumber(Handle, A.operands[0].reg);
                 Info.Page = A.operands[1].imm;
             }
+            if(Insn.id == AARCH64_INS_ADR && A.op_count == 2
+               && A.operands[0].type == AARCH64_OP_REG && A.operands[1].type == AARCH64_OP_IMM)
+            {
+                Info.ExactRegister = registerNumber(Handle, A.operands[0].reg);
+                Info.ExactAddress = A.operands[1].imm;
+            }
             uint32_t Word = uint32_t(Insn.bytes[0]) | uint32_t(Insn.bytes[1]) << 8
                             | uint32_t(Insn.bytes[2]) << 16 | uint32_t(Insn.bytes[3]) << 24;
+            Info.GotLoad = (Word & 0xffc00000) == 0xf9400000;
             // Only forms admitting an AArch64 LO12 relocation: unshifted ADD
             // Xd,Xn,#imm12 and unsigned-offset loads/stores (not pair, indexed,
             // writeback or unscaled forms). Do not turn a completed address
@@ -193,6 +319,7 @@ void completeArm64PageReferences(gtirb::Module& Module)
             else if((Word & 0x3b000000) == 0x39000000 && !Insn.detail->writeback)
             {
                 for(unsigned J = 0; J < A.op_count; ++J)
+                {
                     if(A.operands[J].type == AARCH64_OP_MEM
                        && A.operands[J].mem.index == AARCH64_REG_INVALID
                        && A.operands[J].mem.disp >= 0 && A.operands[J].mem.disp < 4096)
@@ -200,6 +327,14 @@ void completeArm64PageReferences(gtirb::Module& Module)
                         Info.LowRegister = registerNumber(Handle, A.operands[J].mem.base);
                         Info.LowOffset = A.operands[J].mem.disp;
                     }
+                    // A store can use the page register as both its address
+                    // and its payload. That second use makes the exact ADR
+                    // value observable and must not be canonicalized away.
+                    if(A.operands[J].type == AARCH64_OP_REG
+                       && (A.operands[J].access & CS_AC_READ))
+                        if(int Register = registerNumber(Handle, A.operands[J].reg); Register >= 0)
+                            Info.LowValueReads.set(Register);
+                }
             }
             State.Instructions.push_back(Info);
             Bytes += Insn.size;
@@ -208,6 +343,7 @@ void completeArm64PageReferences(gtirb::Module& Module)
         cs_free(Decoded, Count);
     }
     cs_close(&Handle);
+    restoreRelaxedPages(Module, States);
 
     const auto& Cfg = Module.getIR()->getCFG();
     for(auto Edge : boost::make_iterator_range(boost::edges(Cfg)))

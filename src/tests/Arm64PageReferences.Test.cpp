@@ -143,3 +143,90 @@ TEST(Arm64PageReferences, NoGuessesForGotCompletedAddressOrUnrootedCycle)
     completeArm64PageReferences(*Cycle.Module);
     EXPECT_EQ(Cycle.low(4), nullptr);
 }
+
+namespace
+{
+uint32_t pageAdr(unsigned Register, uint64_t Address = 0x400ff8)
+{
+    uint32_t Delta = 0x480000 - Address;
+    return 0x10000000 | (Delta & 3) << 29 | ((Delta >> 2) & 0x7ffff) << 5 | Register;
+}
+
+void pageDifference(PageFixture& F, unsigned Offset = 4)
+{
+    F.Module->setFileFormat(gtirb::FileFormat::ELF);
+    F.Text->setAddress(gtirb::Addr(0x400ff8));
+    auto* Page = F.Module->addSymbol(F.Context, gtirb::Addr(0x480000), "page");
+    F.Text->addSymbolicExpression<gtirb::SymAddrAddr>(
+        Offset, 1, 0, F.Value, Page, gtirb::SymAttributeSet{});
+}
+} // namespace
+
+TEST(Arm64PageReferences, RestoresPageOnlyAdrAndGot)
+{
+    for(bool Got : {false, true})
+    {
+        // ADR x1,page; LDR w1 (or x1 for GOT),[x1,#64] kills the exact page.
+        PageFixture F{pageAdr(1), Got ? 0xf9402021U : 0xb9404021U};
+        F.block(0, 8);
+        pageDifference(F);
+        if(Got)
+        {
+            auto* Data = F.Module->addSection(F.Context, ".got")
+                             ->addByteInterval(F.Context, gtirb::Addr(0x480040), 8)
+                             ->addBlock<gtirb::DataBlock>(F.Context, 0, 8);
+            F.Value->setReferent(Data);
+            auto* Import = F.Module->addSymbol(F.Context, "import");
+            F.Module->addAuxData<gtirb::schema::SymbolForwarding>(
+                std::map<gtirb::UUID, gtirb::UUID>{{F.Value->getUUID(), Import->getUUID()}});
+        }
+        completeArm64PageReferences(*F.Module);
+        ASSERT_NE(F.low(0), nullptr);
+        ASSERT_NE(F.low(4), nullptr);
+        EXPECT_EQ(F.low(0)->Sym, F.Value);
+        EXPECT_EQ(F.low(0)->Attributes.count(gtirb::SymAttribute::GOT), Got ? 1U : 0U);
+        EXPECT_EQ(F.low(4)->Attributes.count(gtirb::SymAttribute::GOT), Got ? 1U : 0U);
+        EXPECT_EQ(F.low(4)->Attributes.count(gtirb::SymAttribute::LO12), 1U);
+        EXPECT_EQ(F.Text->rawBytes<uint8_t>()[3] & 0x9f, 0x90); // ADRP
+    }
+}
+
+TEST(Arm64PageReferences, GotLowRequiresPointerLoad)
+{
+    // LDR w1, STR x0, or ADD x1 at a forwarded slot must not become
+    // LD64_GOT_LO12_NC merely because the original effective address matches.
+    for(uint32_t Low : {0xb9404021U, 0xf9002020U, 0x91010021U})
+    {
+        PageFixture F{pageAdr(1), Low, 0x52800001};
+        F.block(0, 12);
+        pageDifference(F);
+        auto* Data = F.Module->addSection(F.Context, ".got")
+                         ->addByteInterval(F.Context, gtirb::Addr(0x480040), 8)
+                         ->addBlock<gtirb::DataBlock>(F.Context, 0, 8);
+        F.Value->setReferent(Data);
+        auto* Import = F.Module->addSymbol(F.Context, "import");
+        F.Module->addAuxData<gtirb::schema::SymbolForwarding>(
+            std::map<gtirb::UUID, gtirb::UUID>{{F.Value->getUUID(), Import->getUUID()}});
+        completeArm64PageReferences(*F.Module);
+        EXPECT_EQ(F.low(0), nullptr);
+        EXPECT_TRUE(std::holds_alternative<gtirb::SymAddrAddr>(*F.Text->getSymbolicExpression(4)));
+    }
+}
+
+TEST(Arm64PageReferences, ExactPageMustNotEscape)
+{
+    for(bool StoredPage : {false, true})
+    {
+        // A live-out exact base, or STR x1,[x1,#64] followed by killing x1,
+        // must not change the observed page even though its address tail is
+        // target-page. Merely finding one memory operand isn't enough.
+        PageFixture F{pageAdr(1), StoredPage ? 0xf9002021U : 0xb9404020U,
+                      StoredPage ? 0x52800001U : 0xd65f03c0U};
+        F.block(0, 12);
+        pageDifference(F);
+        completeArm64PageReferences(*F.Module);
+        EXPECT_EQ(F.low(0), nullptr);
+        EXPECT_TRUE(std::holds_alternative<gtirb::SymAddrAddr>(*F.Text->getSymbolicExpression(4)));
+        EXPECT_EQ(F.Text->rawBytes<uint8_t>()[3] & 0x9f, 0x10); // ADR
+    }
+}
