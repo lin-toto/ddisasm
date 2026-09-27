@@ -179,6 +179,11 @@ Convert between input_reg and register with arch.reg_map
 .decl relocation(EA:address,Type:symbol,Name:symbol,Addend:number,SymbolIndex:unsigned,Section:symbol,RelType:symbol)
 .input relocation
 
+// A non-allocated REL/RELA table linked to SYMTAB explicitly covers this
+// loaded section. Dynamic relocations alone do not establish coverage.
+.decl elf_static_relocation_section(Name:symbol)
+.input elf_static_relocation_section
+
 .decl relocation_size(Type:symbol,Size:unsigned)
 
 /**

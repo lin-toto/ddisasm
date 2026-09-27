@@ -32,6 +32,22 @@ Ddisasm accepts the following options:
 `--ignore-errors`
 :   Return success even if there are disassembly errors.
 
+`--allow-ambiguous-data-pointers`
+:   Explicitly permit legacy ELF absolute-data pointer guesses, with a warning
+    naming affected objects. By default, a selected pointer without relocation
+    evidence is an error: an address-shaped integer is indistinguishable from a
+    pointer, and changing its value during relayout can corrupt the program.
+    `--ignore-errors` does not enable this policy. Prefer a PIE input or link
+    with `-Wl,--emit-relocs` and retain the resulting static relocation tables.
+    Non-allocated REL/RELA sections linked to SYMTAB establish coverage only
+    for their `sh_info` source section; dynamic relocation tables and static
+    tables for other sections do not. Within a covered section, words without
+    relocations stay literal. Partially stripped sections without a retained
+    table can still be refused. As with other ELF metadata, retained tables
+    must not have individual entries removed. ABI-typed constructor/destructor
+    arrays and typed ELF metadata handled separately (dynamic, relocation,
+    unwind, and PLT/GOT tables) do not require this override.
+
 `-K [ --keep-functions ] arg`
 :   Print the given functions even if they are skipped by default (e.g. _start)
 

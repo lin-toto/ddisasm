@@ -150,6 +150,9 @@ int main(int argc, char **argv)
         "hints", po::value<std::string>(), "location of user-provided hints file")(
         "input-file", po::value<std::string>(), "file to disasemble")(
         "ignore-errors", "Return success even if there are disassembly errors.")(
+        "allow-ambiguous-data-pointers",
+        "Allow legacy guesses for ELF data words without pointer relocation evidence; "
+        "warn about affected objects. Prefer PIE or a link with --emit-relocs.")(
         "keep-functions,K", po::value<std::vector<std::string>>()->multitoken(),
         "Print the given functions even if they are skipped by default (e.g. _start)")(
         "self-diagnose",
@@ -284,7 +287,8 @@ int main(int argc, char **argv)
     AnalysisPipeline Pipeline;
     Pipeline.addListener(std::make_shared<DDisasmPipelineListener>());
     Pipeline.push<DisassemblyPass>(vm.count("self-diagnose") != 0, vm.count("ignore-errors") != 0,
-                                   vm.count("no-cfi-directives") != 0);
+                                   vm.count("no-cfi-directives") != 0,
+                                   vm.count("allow-ambiguous-data-pointers") != 0);
 
     if(vm.count("skip-function-analysis") == 0)
     {
@@ -331,6 +335,7 @@ int main(int argc, char **argv)
 
         // Remove provisional AuxData tables.
         Module.removeAuxData<gtirb::schema::Relocations>();
+        Module.removeAuxData<gtirb::schema::ElfStaticRelocationSections>();
         Module.removeAuxData<gtirb::schema::SectionIndex>();
     }
 

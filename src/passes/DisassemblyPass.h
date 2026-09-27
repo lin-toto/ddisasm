@@ -29,8 +29,9 @@ class DisassemblyPass : public DatalogAnalysisPass
 {
 public:
     DisassemblyPass(bool SelfDiagnose = false, bool IgnoreErrors = false,
-                    bool NoCfiDirectives = false)
-        : SelfDiagnose(SelfDiagnose), IgnoreErrors(IgnoreErrors), NoCfiDirectives(NoCfiDirectives)
+                    bool NoCfiDirectives = false, bool AllowAmbiguousDataPointers = false)
+        : SelfDiagnose(SelfDiagnose), IgnoreErrors(IgnoreErrors), NoCfiDirectives(NoCfiDirectives),
+          AllowAmbiguousDataPointers(AllowAmbiguousDataPointers)
     {
     }
 
@@ -74,6 +75,7 @@ private:
     bool SelfDiagnose = false;
     bool IgnoreErrors = false;
     bool NoCfiDirectives = false;
+    bool AllowAmbiguousDataPointers = false;
 
     static std::map<Target, Factory>& loaders();
 };

@@ -1957,6 +1957,42 @@ void disassembleModule(gtirb::Context &Context, gtirb::Module &Module,
     }
 }
 
+void checkAmbiguousDataPointers(AnalysisPassResult &Result, souffle::SouffleProgram &Program,
+                                bool AllowAmbiguousDataPointers)
+{
+    // Group by original object (or section for anonymous data), rather than
+    // printing thousands of words from a large table. Keep a deterministic
+    // first example and count so diagnostics remain useful on real binaries.
+    std::map<std::string, std::set<std::tuple<uint64_t, uint64_t, uint64_t>>> Objects;
+    for(auto &Output : *Program.getRelation("ambiguous_data_pointer"))
+    {
+        uint64_t EA, Size, Value;
+        std::string Source;
+        Output >> EA >> Size >> Value >> Source;
+        Objects[Source].emplace(EA, Size, Value);
+    }
+    if(Objects.empty())
+        return;
+
+    std::stringstream Message;
+    Message << (AllowAmbiguousDataPointers ? "Allowing" : "Refusing")
+            << " ambiguous data pointers without relocation evidence. "
+            << "These words may be integer data; relayout can corrupt them.\n";
+    for(const auto &[Name, Words] : Objects)
+    {
+        auto [EA, Size, Value] = *Words.begin();
+        Message << "\t" << Name << ": " << Words.size() << " word(s); first at 0x" << std::hex
+                << EA << " (" << std::dec << Size << " bytes, value 0x" << std::hex << Value
+                << std::dec << ")\n";
+    }
+    Message << "Use a PIE input, or link with --emit-relocs and retain its static relocation "
+               "tables. --allow-ambiguous-data-pointers explicitly keeps the legacy guesses "
+               "at the risk of changing program data.";
+    // --ignore-errors is deliberately not an opt-in to this unsafe policy.
+    auto &Messages = AllowAmbiguousDataPointers ? Result.Warnings : Result.Errors;
+    Messages.push_back(Message.str());
+}
+
 void performSanityChecks(AnalysisPassResult &Result, souffle::SouffleProgram &Program,
                          bool selfDiagnose, bool ignoreErrors)
 {

@@ -86,6 +86,10 @@ void DisassemblyPass::transformImpl(AnalysisPassResult& Result, gtirb::Context& 
 {
     DatalogAnalysisPass::transformImpl(Result, Context, Module);
 
+    checkAmbiguousDataPointers(Result, *Program, AllowAmbiguousDataPointers);
+    if(!Result.Errors.empty())
+        return;
+
     disassembleModule(Context, Module, *Program, SelfDiagnose);
     performSanityChecks(Result, *Program, SelfDiagnose, IgnoreErrors);
 }

@@ -1262,6 +1262,31 @@ void ElfReader::addAuxData()
     }
     Module->addAuxData<gtirb::schema::Relocations>(std::move(RelocationTuples));
 
+    // --emit-relocs retains non-allocated relocation sections linked to the
+    // static symbol table. Their sh_info identifies the section whose pointer
+    // fields they describe. Do not infer coverage from .rela.dyn/.rela.plt,
+    // section names, or from a relocation table for some other section.
+    std::vector<const LIEF::ELF::Section *> Sections;
+    for(const auto &Section : Elf->sections())
+        Sections.push_back(&Section);
+    std::set<std::string> StaticRelocationSections;
+    for(const auto *Section : Sections)
+    {
+        if((Section->type() != LIEF::ELF::Section::TYPE::REL
+            && Section->type() != LIEF::ELF::Section::TYPE::RELA)
+           || Section->has(LIEF::ELF::Section::FLAGS::ALLOC)
+           || Section->link() >= Sections.size()
+           || Section->information() >= Sections.size())
+            continue;
+        const auto *Symbols = Sections[Section->link()];
+        const auto *Target = Sections[Section->information()];
+        if(Symbols->type() == LIEF::ELF::Section::TYPE::SYMTAB
+           && Target->has(LIEF::ELF::Section::FLAGS::ALLOC))
+            StaticRelocationSections.insert(Target->name());
+    }
+    Module->addAuxData<gtirb::schema::ElfStaticRelocationSections>(
+        std::move(StaticRelocationSections));
+
     std::vector<std::string> Libraries = Elf->imported_libraries();
     Module->addAuxData<gtirb::schema::Libraries>(std::move(Libraries));
 

@@ -58,6 +58,7 @@ void registerAuxDataTypes()
     gtirb::AuxDataContainer::registerAuxDataType<ArchInfo>();
     gtirb::AuxDataContainer::registerAuxDataType<Sccs>();
     gtirb::AuxDataContainer::registerAuxDataType<Relocations>();
+    gtirb::AuxDataContainer::registerAuxDataType<ElfStaticRelocationSections>();
     gtirb::AuxDataContainer::registerAuxDataType<Encodings>();
     gtirb::AuxDataContainer::registerAuxDataType<SectionProperties>();
     gtirb::AuxDataContainer::registerAuxDataType<SectionIndex>();

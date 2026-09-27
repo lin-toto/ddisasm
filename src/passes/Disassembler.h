@@ -31,6 +31,8 @@
 void disassembleModule(gtirb::Context &context, gtirb::Module &module,
                        souffle::SouffleProgram &Program, bool selfDiagnose);
 void buildLiveRegisters(gtirb::Module &Module, souffle::SouffleProgram &Program);
+void checkAmbiguousDataPointers(AnalysisPassResult &Result, souffle::SouffleProgram &Program,
+                                bool AllowAmbiguousDataPointers);
 void performSanityChecks(AnalysisPassResult &Result, souffle::SouffleProgram &Program,
                          bool selfDiagnose, bool ignoreErrors);
 

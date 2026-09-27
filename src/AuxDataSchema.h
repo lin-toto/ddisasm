@@ -89,6 +89,14 @@ namespace gtirb
             typedef std::set<auxdata::Relocation> Type;
         };
 
+        /// Loaded sections with retained static ELF relocation tables.
+        /// Dynamic loader relocations do not establish this coverage.
+        struct ElfStaticRelocationSections
+        {
+            static constexpr const char* Name = "elfStaticRelocationSections";
+            typedef std::set<std::string> Type;
+        };
+
         /// \brief Unresolved RISC-V PC-relative pairs that may not survive relayout.
         /// Entries are {original high address, original low address, reason}.
         struct RiscvUnresolvedPcrelReferences

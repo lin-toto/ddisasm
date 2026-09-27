@@ -67,6 +67,10 @@ void ModuleLoader(const gtirb::Module& Module, souffle::SouffleProgram& Program)
     relations::insert<std::vector<gtirb::Addr>>(Program, "base_address", {BaseAddress});
     relations::insert<std::vector<gtirb::Addr>>(Program, "entry_point", {EntryPoint});
     relations::insert<std::vector<std::string>>(Program, "endianness", {Endianness});
+    if(auto Sections = Module.getAuxData<gtirb::schema::ElfStaticRelocationSections>())
+    {
+        relations::insert(Program, "elf_static_relocation_section", *Sections);
+    }
 }
 
 const char* binaryFormat(const gtirb::FileFormat Format)
