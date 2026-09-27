@@ -237,12 +237,14 @@ arch.lra_extra_use(EA,Reg):-
     reg_map(RegIn,Reg),
     arch.lra_register(Reg,_,_).
 
-// Capstone 5 omits ADOX's destination read. Operands here use AT&T order.
+// Capstone 6.0.0-Alpha11 still omits ADOX's destination read (as did Capstone 5).
+// Operands here use AT&T order.
 arch.register_access_override(EA,Reg,"R",1):-
     instruction(EA,_,_,"ADOX",_,Destination,0,0,_,_),
     op_regdirect_contains_reg(Destination,Reg).
 
-// TEST consumes both value operands and writes only flags. Capstone 5 marks
+// TEST consumes both value operands and writes only flags. Capstone 6.0.0-Alpha11
+// still has the Capstone 5 access error: it marks
 // the register source of TEST r/m,reg as write-only. Correct both sides of
 // the access contract, including subregister forms, before use/def and LRA.
 arch.register_access_override(EA,Reg,"R",1):-
