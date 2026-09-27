@@ -2581,9 +2581,24 @@ bss_data(EA):-
 ///////////////////////////////////////////////////////////////////////
 // Final symbolic expressions in terms of symbols
 
+// A retained PC32 relocation describes S+A-P, not an absolute pointer. For
+// recognized switch entries use the proven target/table-base relationship:
+// A may include the entry's offset from the table base, so using S+A as the
+// target would attach a label in the middle of a different instruction after
+// rewriting. The original relocation still informs earlier analyses.
+.decl relative_table_relocation(EA:address)
+
+relative_table_relocation(EA):-
+    binary_format("ELF"),
+    binary_isa("X64"),
+    !binary_type("REL"),
+    relocation(EA,"PC32",_,_,_,Section,_),
+    elf_static_relocation_section(Section),
+    symbol_minus_symbol(EA,4,_,_,_,_).
 
 symbolic_expr(EA,Size,Symbol,Offset):-
     symbolic_expr_from_relocation(EA,Size,Symbol,Offset,_),
+    !relative_table_relocation(EA),
     // Empty symbols must have a symbol name inferred.
     Symbol != "".
 
@@ -2593,12 +2608,14 @@ symbolic_expr(EA,Size,Symbol,Offset):-
 // without a definition intentionally retain name/version-based forwarding.
 symbolic_expr_symbol_address(EA,1,Symbol,TargetEA):-
     symbolic_expr_from_relocation(EA,_,Symbol,_,TargetEA),
+    !relative_table_relocation(EA),
     Symbol != "",
     defined_symbol(TargetEA,_,_,_,_,_,_,_,Symbol).
 
 symbolic_expr(EA,Size,Symbol,Offset),
 symbolic_expr_symbol_address(EA,1,Symbol,TargetEA):-
     symbolic_expr_from_relocation(EA,Size,"",Offset,TargetEA),
+    !relative_table_relocation(EA),
     best_symexpr_symbol(TargetEA,Symbol,_).
 
 symbolic_expr_symbol_minus_symbol(EA,Size,SymbolName1,SymbolName2,Scale,Offset):-
@@ -2609,7 +2626,10 @@ symbolic_expr_symbol_minus_symbol(EA,Size,SymbolName1,SymbolName2,Scale,FinalOff
 symbolic_expr_symbol_address(EA,1,SymbolName1,NewSymbol1),
 symbolic_expr_symbol_address(EA,2,SymbolName2,NewSymbol2):-
     symbol_minus_symbol(EA,Size,Symbol1,Symbol2,Scale,Offset),
-    !symbolic_expr_from_relocation(EA,_,_,_,_),
+    (
+        !symbolic_expr_from_relocation(EA,_,_,_,_);
+        relative_table_relocation(EA)
+    ),
     !symbol_minus_symbol_from_relocation(EA,_,_,_,_,_),
     (
         moved_data_label(EA,Size,Symbol1,NewSymbol1),
