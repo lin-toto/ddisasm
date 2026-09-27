@@ -22,6 +22,7 @@ add_executable(
   ArchiveReader.Test.cpp
   InstructionRelations.Test.cpp
   DatalogIO.Test.cpp
+  DataLoader.Test.cpp
   LiveRegisters.Test.cpp
   Arm64PageReferences.Test.cpp
   SymbolLookup.Test.cpp

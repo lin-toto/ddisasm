@@ -59,8 +59,18 @@ void DataLoader::load(const gtirb::Module& Module, DataFacts& Facts)
     Facts.Min = *Min;
     Facts.Max = *Max;
 
+    auto* SectionProperties = Module.getAuxData<gtirb::schema::SectionProperties>();
     for(const auto& Section : Module.sections())
     {
+        // ELF notes contain typed metadata, not address-bearing program data.
+        // In particular, a build-ID word may accidentally look like a pointer.
+        // Use SHT_NOTE rather than the section name, which is not authoritative.
+        if(Module.getFileFormat() == gtirb::FileFormat::ELF && SectionProperties)
+        {
+            auto Property = SectionProperties->find(Section.getUUID());
+            if(Property != SectionProperties->end() && std::get<0>(Property->second) == 7)
+                continue;
+        }
         bool Executable = Section.isFlagSet(gtirb::SectionFlag::Executable);
         bool Initialized = Section.isFlagSet(gtirb::SectionFlag::Initialized);
         bool Loaded = Section.isFlagSet(gtirb::SectionFlag::Loaded);
