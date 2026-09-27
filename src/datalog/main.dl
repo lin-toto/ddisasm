@@ -263,6 +263,11 @@ AccessMode may be "R" or "W"
 .decl register_access(EA:address,Register:input_reg,AccessMode:access_mode)
 .input register_access
 
+// x64 disjoint vector pieces: R reads, W completely replaces a piece.
+// Kept separate from native accesses used by non-liveness analyses.
+.decl vector_register_access(EA:address,Register:register,AccessMode:access_mode)
+.input vector_register_access
+
 /**
 The operand at index Index is accessed at EA with AccessMode
 */

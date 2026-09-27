@@ -857,7 +857,7 @@ void buildLiveRegisters(gtirb::Module &Module, souffle::SouffleProgram &Program)
         uint64_t Index;
         std::string Name;
         Output >> Index >> Name;
-        if(Index >= 64)
+        if(Index >= 128)
         {
             std::cerr << "WARNING: live-register index " << Index << " is too large\n";
             continue;
@@ -871,6 +871,7 @@ void buildLiveRegisters(gtirb::Module &Module, souffle::SouffleProgram &Program)
 
     Module.removeAuxData<gtirb::schema::LiveRegisterNames>();
     Module.removeAuxData<gtirb::schema::LiveRegisterSets>();
+    Module.removeAuxData<gtirb::schema::LiveRegisterSetsHigh>();
     if(RegisterNames.empty())
     {
         return;
@@ -878,6 +879,8 @@ void buildLiveRegisters(gtirb::Module &Module, souffle::SouffleProgram &Program)
 
     std::map<gtirb::Addr, std::vector<gtirb::Offset>> InstructionOffsets;
     gtirb::schema::LiveRegisterSets::Type RegisterSets;
+    gtirb::schema::LiveRegisterSetsHigh::Type RegisterSetsHigh;
+    const bool Wide = RegisterNames.size() > 64;
     for(auto &Output : *Program.getRelation("code_in_refined_block"))
     {
         gtirb::Addr EA, BlockAddress;
@@ -893,6 +896,8 @@ void buildLiveRegisters(gtirb::Module &Module, souffle::SouffleProgram &Program)
             // An instruction can belong to several overlapping refined blocks.
             InstructionOffsets[EA].push_back(Offset);
             RegisterSets.emplace(Offset, 0);
+            if(Wide)
+                RegisterSetsHigh.emplace(Offset, 0);
         }
     }
 
@@ -901,14 +906,15 @@ void buildLiveRegisters(gtirb::Module &Module, souffle::SouffleProgram &Program)
         gtirb::Addr EA;
         uint64_t Index;
         Output >> EA >> Index;
-        if(Index < 64)
+        if(Index < RegisterNames.size())
         {
             auto It = InstructionOffsets.find(EA);
             if(It != InstructionOffsets.end())
             {
                 for(const gtirb::Offset &Offset : It->second)
                 {
-                    RegisterSets[Offset] |= uint64_t{1} << Index;
+                    auto &Sets = Index < 64 ? RegisterSets : RegisterSetsHigh;
+                    Sets[Offset] |= uint64_t{1} << (Index % 64);
                 }
             }
         }
@@ -916,6 +922,8 @@ void buildLiveRegisters(gtirb::Module &Module, souffle::SouffleProgram &Program)
 
     Module.addAuxData<gtirb::schema::LiveRegisterNames>(std::move(RegisterNames));
     Module.addAuxData<gtirb::schema::LiveRegisterSets>(std::move(RegisterSets));
+    if(Wide)
+        Module.addAuxData<gtirb::schema::LiveRegisterSetsHigh>(std::move(RegisterSetsHigh));
 }
 
 // Create DataObjects for labeled objects in the BSS sections, without adding

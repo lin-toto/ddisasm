@@ -552,6 +552,10 @@ bit in the output mask and Name is its GTIRB assembly name.
 lra_register("",0,""):-
     false.
 
+/** Vector pieces use ABI summaries instead of interprocedural data flow. */
+.decl lra_vector_register(Reg:register)
+lra_vector_register(""):- false.
+
 /** Registers whose values may be changed by a standard function call. */
 .decl lra_caller_saved(Reg:register)
 

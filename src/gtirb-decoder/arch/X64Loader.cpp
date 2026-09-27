@@ -47,6 +47,7 @@ void X64Loader::decode(BinaryFacts& Facts, const uint8_t* Bytes, uint64_t Size, 
         // Add the instruction to the facts table.
         Facts.Instructions.add(*Instruction);
         loadRegisterAccesses(Facts, Addr, *CsInsn);
+        loadVectorAccesses(Facts, *CsInsn);
     }
     else
     {
@@ -164,4 +165,114 @@ void X64Loader::registerAccesses(const cs_insn& CsInstruction, std::vector<std::
 {
     InstructionLoader::registerAccesses(CsInstruction, Reads, Writes);
     fixX86Capstone6Accesses(CsInstruction, Reads, Writes);
+}
+
+void X64Loader::loadVectorAccesses(BinaryFacts& Facts, const cs_insn& Insn)
+{
+    const auto &X = Insn.detail->x86;
+    auto [Prefix, Op] = splitMnemonic(Insn);
+    auto IsVector = [](unsigned Reg) {
+        return (Reg >= X86_REG_XMM0 && Reg <= X86_REG_ZMM31)
+               || (Reg >= X86_REG_K0 && Reg <= X86_REG_K7);
+    };
+    bool HasVectorOperand = false;
+    for(unsigned I = 0; I < X.op_count; ++I)
+        HasVectorOperand |= (X.operands[I].type == X86_OP_REG && IsVector(X.operands[I].reg))
+                            || (X.operands[I].type == X86_OP_MEM && IsVector(X.operands[I].mem.index));
+    // Avoid a second native access query on ordinary GPR instructions. These
+    // two zeroing instructions have no operands but implicit vector writes.
+    if(!HasVectorOperand && Op != "VZEROUPPER" && Op != "VZEROALL") return;
+    // VEX/EVEX may follow address-size/segment prefixes. The opcode bytes in
+    // Capstone's detail omit legacy prefixes and retain the vector prefix.
+    bool VectorEncoding = X.opcode[0] == 0xc4 || X.opcode[0] == 0xc5 || X.opcode[0] == 0x62;
+    bool Masked = false, ZeroMask = false;
+    for(unsigned I = 0; I < X.op_count; ++I)
+    {
+        const auto &Operand = X.operands[I];
+        Masked |= Operand.type == X86_OP_REG && Operand.reg >= X86_REG_K1
+                  && Operand.reg <= X86_REG_K7;
+        ZeroMask |= Operand.avx_zero_opmask;
+    }
+    // An explicit predicate operand is distinct from a k-register instruction.
+    Masked &= X.op_count && X.operands[0].type == X86_OP_REG
+              && X.operands[0].reg >= X86_REG_XMM0;
+    std::string ZeroSource;
+    bool ZeroIdiom = Op == "PXOR" || Op == "XORPS" || Op == "XORPD"
+                     || Op == "PSUBB" || Op == "PSUBW" || Op == "PSUBD" || Op == "PSUBQ"
+                     || Op == "VPXOR" || Op == "VPXORD" || Op == "VPXORQ"
+                     || Op == "VXORPS" || Op == "VXORPD"
+                     || Op == "VPSUBB" || Op == "VPSUBW" || Op == "VPSUBD" || Op == "VPSUBQ"
+                     || Op == "KXORB" || Op == "KXORW" || Op == "KXORD" || Op == "KXORQ";
+    // Ignore opmask operands when locating the two data sources.
+    std::vector<unsigned> DataRegisters;
+    for(unsigned I = 0; I < X.op_count; ++I)
+        if(X.operands[I].type == X86_OP_REG
+           && ((X.operands[I].reg >= X86_REG_XMM0 && X.operands[I].reg <= X86_REG_ZMM31)
+               || (Op[0] == 'K' && X.operands[I].reg >= X86_REG_K0 && X.operands[I].reg <= X86_REG_K7)))
+            DataRegisters.push_back(X.operands[I].reg);
+    unsigned Required = VectorEncoding ? 3 : 2;
+    if(ZeroIdiom && DataRegisters.size() == Required
+       && DataRegisters[Required - 1] == DataRegisters[Required - 2])
+        ZeroSource = uppercase(cs_reg_name(*CsHandle, DataRegisters.back()));
+
+    auto Access = [&](const std::string &Reg, const char *Mode) {
+        Facts.Instructions.vectorAccess({gtirb::Addr(Insn.address), Mode, Reg});
+    };
+    auto Pieces = [](const std::string &Reg) {
+        std::vector<std::string> Result;
+        if(Reg.size() > 3 && (Reg.substr(0,3) == "XMM" || Reg.substr(0,3) == "YMM"
+                             || Reg.substr(0,3) == "ZMM"))
+        {
+            auto N = Reg.substr(3);
+            Result.push_back("XMM" + N);
+            if(Reg[0] != 'X') Result.push_back("YMM" + N + "H");
+            if(Reg[0] == 'Z') Result.push_back("ZMM" + N + "H");
+        }
+        else if(Reg.size() == 2 && Reg[0] == 'K' && Reg[1] >= '0' && Reg[1] <= '7')
+            Result.push_back(Reg);
+        return Result;
+    };
+    std::vector<std::string> Reads, Writes;
+    registerAccesses(Insn, Reads, Writes);
+    for(const auto &Reg : Reads)
+        if(Reg != ZeroSource)
+            for(const auto &Piece : Pieces(Reg)) Access(Piece, "R");
+    for(const auto &Reg : Writes)
+    {
+        auto Parts = Pieces(Reg);
+        if(Parts.empty()) continue;
+        bool Xmm = Reg.substr(0,3) == "XMM";
+        // Legacy scalar/insert forms can leave part of the low 128 bits intact.
+        // Even when Capstone omits that destination read, retain the low piece.
+        bool Partial = !VectorEncoding && Xmm
+            && ((Op.size() >= 2 && (Op.substr(Op.size()-2) == "SS" || Op.substr(Op.size()-2) == "SD"))
+                || Op.find("PINSR") == 0 || Op == "INSERTPS" || Op == "MOVLPS"
+                || Op == "MOVLPD" || Op == "MOVHPS" || Op == "MOVHPD"
+                || Op == "MOVLHPS" || Op == "MOVHLPS");
+        Partial |= Op.find("GATHER") != std::string::npos;
+        bool MemorySource = X.op_count > 1 && X.operands[1].type == X86_OP_MEM;
+        if((Op == "MOVSS" || Op == "MOVSD") && MemorySource) Partial = false;
+        for(const auto &Piece : Parts)
+        {
+            Access(Piece, "W");
+            if(Partial || (Masked && !ZeroMask)) Access(Piece, "R");
+        }
+        // VEX/EVEX zero all bits above the destination's encoded vector length,
+        // independently of merging writemasks below that length.
+        if(VectorEncoding && Reg.size() > 3 && Reg[1] == 'M')
+        {
+            auto N = Reg.substr(3);
+            if(Xmm) Access("YMM" + N + "H", "W");
+            if(Reg[0] != 'Z') Access("ZMM" + N + "H", "W");
+        }
+    }
+    // These have implicit definitions which cs_regs_access does not enumerate.
+    if(Op == "VZEROUPPER" || Op == "VZEROALL")
+        for(unsigned I = 0; I < 16; ++I)
+        {
+            auto N = std::to_string(I);
+            Access("YMM" + N + "H", "W");
+            Access("ZMM" + N + "H", "W");
+            if(Op == "VZEROALL") Access("XMM" + N, "W");
+        }
 }

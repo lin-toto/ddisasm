@@ -97,7 +97,13 @@ lra_next(EA,Next):-
 lra_use(EA,Reg):-
     lra_instruction(EA),
     reg_def_use.used(EA,Reg,_),
-    arch.lra_register(Reg,_,_).
+    arch.lra_register(Reg,_,_),
+    !arch.lra_vector_register(Reg).
+
+lra_use(EA,Reg):-
+    lra_instruction(EA),
+    vector_register_access(EA,Reg,"R"),
+    arch.lra_vector_register(Reg).
 
 lra_use(EA,Reg):-
     lra_instruction(EA),
@@ -112,7 +118,8 @@ lra_use(EA,Reg):-
     cfg_edge(Block,Dest,_,_,Type),
     (Type = "call"; Type = "branch"),
     defined_symbol(Dest,_,_,"WEAK",_,_,_,_,_),
-    arch.lra_register(Reg,_,_).
+    arch.lra_register(Reg,_,_),
+    !arch.lra_vector_register(Reg).
 
 // The kernel calling convention is not the ordinary function ABI. Without an
 // OS-specific summary, retain all tracked registers at the system-call boundary.
@@ -163,9 +170,39 @@ lra_use(EA,Reg):-
         reg_call(EA,_);
         reg_jump(EA,_)
     ),
-    arch.lra_register(Reg,_,_).
+    arch.lra_register(Reg,_,_),
+    !arch.lra_vector_register(Reg).
+
+.decl lra_vector_call(EA:address)
+lra_vector_call(EA):- lra_external_call(EA).
+lra_vector_call(EA):- refined_block_last_instruction(Block,EA), lra_internal_call(Block).
+lra_vector_call(EA):- lra_instruction(EA), (indirect_call(EA); reg_call(EA,_)).
+
+.decl lra_vector_tail(Block:address,Dest:address)
+lra_vector_tail(Block,Dest):-
+    cfg_edge(Block,Dest,_,_,"branch"), function_inference.function_entry(Dest),
+    function_inference.in_function(Block,Function), Dest != Function.
+
+lra_use(EA,Reg):-
+    lra_vector_call(EA), arch.lra_vector_register(Reg), arch.lra_argument_register(Reg).
+lra_use(EA,Reg):-
+    refined_block_last_instruction(Block,EA), lra_vector_tail(Block,_),
+    arch.lra_vector_register(Reg), arch.lra_argument_register(Reg).
+
+// A recovered jump table has explicit CFG targets. Only genuinely unresolved
+// branches need the all-vector fallback. Unknown calls still have an ABI.
+lra_use(EA,Reg):-
+    refined_block_last_instruction(Block,EA), !arch.return(EA),
+    cfg_edge_to_top(Block,_,"branch"), arch.lra_vector_register(Reg).
+
+// This vector summary is specifically System V; do not infer Win64 saves.
+lra_use(EA,Reg):-
+    lra_instruction(EA), arch.lra_vector_register(Reg), !binary_format("ELF").
 
 .decl lra_written(EA:address,Reg:register)
+
+lra_written(EA,Reg):-
+    lra_instruction(EA), vector_register_access(EA,Reg,"W"), arch.lra_vector_register(Reg).
 
 lra_written(EA,Reg):-
     lra_instruction(EA),
@@ -195,7 +232,20 @@ lra_kill(EA,Reg):-
 
 lra_live_out(EA,Reg):-
     lra_next(EA,Next),
-    lra_live_in(Next,Reg).
+    lra_live_in(Next,Reg),
+    !arch.lra_vector_register(Reg).
+
+// Vectors are caller-saved: never enter callees, follow return-to-caller edges,
+// or carry the continuation's uses backwards across a call instruction.
+lra_live_out(EA,Reg):-
+    code_in_refined_block(EA,Block), next(EA,Next), code_in_refined_block(Next,Block),
+    !lra_vector_call(EA), !arch.return(EA),
+    lra_live_in(Next,Reg), arch.lra_vector_register(Reg).
+lra_live_out(EA,Reg):-
+    refined_block_last_instruction(Block,EA), !lra_vector_call(EA), !arch.return(EA),
+    cfg_edge(Block,Dest,_,_,Type), (Type = "branch"; Type = "fallthrough"),
+    !lra_vector_tail(Block,Dest), !plt_block(Dest,_),
+    lra_live_in(Dest,Reg), arch.lra_vector_register(Reg).
 
 // A caller may observe preserved registers and ABI return values at a return.
 lra_live_out(EA,Reg):-

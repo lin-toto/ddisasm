@@ -21,6 +21,7 @@ TEST(LiveRegistersTest, OverlappingBlocks)
 {
     gtirb::AuxDataContainer::registerAuxDataType<gtirb::schema::LiveRegisterNames>();
     gtirb::AuxDataContainer::registerAuxDataType<gtirb::schema::LiveRegisterSets>();
+    gtirb::AuxDataContainer::registerAuxDataType<gtirb::schema::LiveRegisterSetsHigh>();
     auto Program = std::unique_ptr<souffle::SouffleProgram>(
         souffle::ProgramFactory::newInstance("souffle_disasm_x86_64"));
     ASSERT_NE(Program, nullptr);
@@ -60,4 +61,16 @@ TEST(LiveRegistersTest, OverlappingBlocks)
     EXPECT_EQ(Masks->count(gtirb::Offset(Second->getUUID(), 5)), 0);
     EXPECT_EQ(Masks->count(gtirb::Offset(Short->getUUID(), 4)), 0);
     EXPECT_EQ(Masks->size(), 5);
+
+    EXPECT_EQ(Module->getAuxData<gtirb::schema::LiveRegisterSetsHigh>(), nullptr);
+    DatalogIO::insertTuple("119\tk7", *Program, Program->getRelation("live_register_name"));
+    DatalogIO::insertTuple("0x1004\t119", *Program, Program->getRelation("live_register"));
+    buildLiveRegisters(*Module, *Program);
+    const auto *High = Module->getAuxData<gtirb::schema::LiveRegisterSetsHigh>();
+    ASSERT_NE(High, nullptr);
+    EXPECT_EQ(High->size(), 5);
+    EXPECT_EQ(High->at(gtirb::Offset(First->getUUID(), 4)), uint64_t{1} << 55);
+    EXPECT_EQ(High->at(gtirb::Offset(Second->getUUID(), 0)), uint64_t{1} << 55);
+    EXPECT_EQ(High->at(gtirb::Offset(Second->getUUID(), 4)), 0);
+    EXPECT_EQ(High->count(gtirb::Offset(Second->getUUID(), 5)), 0);
 }

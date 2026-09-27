@@ -52,6 +52,7 @@ protected:
                           std::vector<std::string>& Writes) override;
 
 private:
+    void loadVectorAccesses(BinaryFacts& Facts, const cs_insn& Instruction);
     std::optional<relations::Operand> build(const cs_x86_op& CsOp);
     std::optional<relations::Instruction> build(BinaryFacts& Facts, const cs_insn& CsInstruction);
     std::tuple<std::string, std::string> splitMnemonic(const cs_insn& CsInstruction);

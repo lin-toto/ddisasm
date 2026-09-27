@@ -55,6 +55,26 @@ live-in set. A missing entry therefore means that liveness is unknown and
 should be handled conservatively. These tables are currently generated for
 X64, ARM64, RISCV32, and RISCV64 modules.
 
+X64 additionally emits **liveRegisterSetsHigh**, with the same mapping type
+and exactly the same instruction keys. It contains bits 64–127 of
+`liveRegisterNames`; the original table contains bits 0–63. Consumers must
+require both words before making vector deadness claims, and migrate both
+tables through instruction insertions, replacements and section copies.
+Other architectures retain the single-word representation.
+
+The first sixteen X64 names/bits are unchanged. Bits 16–47 are `xmm0`–`xmm31`
+(low 128 bits), 48–79 are `ymm0h`–`ymm31h` (bits 128–255), 80–111 are
+`zmm0h`–`zmm31h` (bits 256–511), and 112–119 are `k0`–`k7`.
+Legacy definitions only kill the pieces they fully replace. VEX/EVEX writes
+also kill zeroed upper pieces; merging masks and partial low-lane writes retain
+their incoming pieces. Recognized zero idioms do not read their data inputs.
+
+System V X64 vector flow is intraprocedural: every call consumes XMM0–7 and
+clobbers all pieces; returns consume XMM0–1. Recovered internal tail calls use
+the argument summary. Unresolved indirect branches keep all pieces live.
+This does not change the existing interprocedural GPR flow below, and is not
+a Windows vector ABI model (non-ELF vector masks stay conservative).
+
 X64 `rflags` tracks the six arithmetic flags (CF/PF/AF/ZF/SF/OF), not DF or
 other control flags. ADD, SUB, CMP, NEG, ADC and SBB completely define this
 value; ADC/SBB still require their incoming carry. Partial writes, shifts and
@@ -62,7 +82,7 @@ instructions with undefined outputs remain conservative. Consumers must
 preserve non-arithmetic flags independently if they modify them. External-call
 ABI summaries remain separate from this instruction-write rule.
 
-Direct transfers to defined weak symbols keep all tracked registers live.
+Direct transfers to defined weak symbols keep all tracked non-vector registers live.
 Relinking may replace their implementation, so the current body cannot justify
 discarding inputs. Ordinary non-weak internal calls still use callee dataflow.
 

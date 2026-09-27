@@ -186,6 +186,23 @@ arch.lra_register("R14",13,"r14").
 arch.lra_register("R15",14,"r15").
 arch.lra_register("RFLAGS",15,"rflags").
 
+// Three non-overlapping pieces per architectural vector register. The second
+// mask word carries indices >=64; the first sixteen GPR/flags bits are stable.
+arch.lra_register(cat("XMM",to_string(I)),16+I,cat("xmm",to_string(I))),
+arch.lra_register(cat("YMM",to_string(I),"H"),48+I,cat("ymm",to_string(I),"h")),
+arch.lra_register(cat("ZMM",to_string(I),"H"),80+I,cat("zmm",to_string(I),"h")):-
+    I = range(0,32,1).
+
+arch.lra_register(cat("K",to_string(I)),112+I,cat("k",to_string(I))):-
+    I = range(0,8,1).
+
+arch.lra_vector_register(Reg):- arch.lra_register(Reg,I,_), I >= 16.
+arch.lra_caller_saved(Reg):- arch.lra_vector_register(Reg), binary_format("ELF").
+arch.lra_argument_register(cat("XMM",to_string(I))):-
+    I = range(0,8,1), binary_format("ELF").
+arch.lra_return_register("XMM0"):- binary_format("ELF").
+arch.lra_return_register("XMM1"):- binary_format("ELF").
+
 arch.lra_caller_saved("RAX").
 arch.lra_caller_saved("RCX").
 arch.lra_caller_saved("RDX").

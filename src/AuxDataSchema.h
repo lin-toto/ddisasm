@@ -141,6 +141,13 @@ namespace gtirb
             typedef std::map<gtirb::Offset, uint64_t> Type;
         };
 
+        /// Bits 64–127 of LiveRegisterNames. Omitted for <=64-register ISAs.
+        struct LiveRegisterSetsHigh
+        {
+            static constexpr const char* Name = "liveRegisterSetsHigh";
+            typedef std::map<gtirb::Offset, uint64_t> Type;
+        };
+
         /// \brief Auxiliary data mapping PE load configuration field names to number values.
         struct PeLoadConfig
         {

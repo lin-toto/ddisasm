@@ -216,6 +216,16 @@ public:
         return RegisterAccesses;
     }
 
+    void vectorAccess(const relations::RegisterAccess& Access)
+    {
+        VectorAccesses.push_back(Access);
+    }
+
+    const std::vector<relations::RegisterAccess>& vectorAccesses() const
+    {
+        return VectorAccesses;
+    }
+
 private:
     std::vector<relations::Instruction> Instructions;
     std::vector<gtirb::Addr> InvalidInstructions;
@@ -226,6 +236,7 @@ private:
     std::vector<relations::InstructionCondCode> InstructionCondCodeList;
     std::vector<relations::InstructionOpAccess> InstructionOpAccessList;
     std::vector<relations::RegisterAccess> RegisterAccesses;
+    std::vector<relations::RegisterAccess> VectorAccesses;
 };
 
 struct BinaryFacts
