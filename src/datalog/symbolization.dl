@@ -2596,9 +2596,43 @@ relative_table_relocation(EA):-
     elf_static_relocation_section(Section),
     symbol_minus_symbol(EA,4,_,_,_,_).
 
+// A linked local transfer can retain a relocation to function+offset while
+// the decoded destination is a distinct block. Rewriters move that block
+// independently; preserve its identity rather than the old byte distance.
+// Only consume the exact symbol identity selected by relocation processing,
+// and only where both it and the encoded CFG destination agree. Dynamic text
+// relocations, unresolved imports and PLT references are deliberately excluded.
+.decl relocated_direct_target(Field:address,Size:unsigned,Dest:address)
+
+relocated_direct_target(EA+FieldOffset,Size,Dest):-
+    binary_format("ELF"),
+    !binary_type("REL"),
+    !elf_has_runtime_text_relocations(),
+    instruction_immediate_offset(EA,_,FieldOffset,Size),
+    relocation(EA+FieldOffset,_,_,_,_,Section,_),
+    elf_static_relocation_section(Section),
+    symbolic_expr_from_relocation(EA+FieldOffset,Size,Name,Addend,Base),
+    Name != "",
+    Addend != 0,
+    (direct_call(EA,Dest); direct_jump(EA,Dest)),
+    as(Dest,number) = as(Base,number) + Addend,
+    code(EA),
+    code(Dest),
+    block(Dest),
+    !plt_block(Dest,_).
+
+labeled_ea(Dest):-
+    relocated_direct_target(_,_,Dest).
+
+symbolic_expr(Field,Size,Name,0),
+symbolic_expr_symbol_address(Field,1,Name,Dest):-
+    relocated_direct_target(Field,Size,Dest),
+    best_symexpr_symbol(Dest,Name,"Beg").
+
 symbolic_expr(EA,Size,Symbol,Offset):-
     symbolic_expr_from_relocation(EA,Size,Symbol,Offset,_),
     !relative_table_relocation(EA),
+    !relocated_direct_target(EA,_,_),
     // Empty symbols must have a symbol name inferred.
     Symbol != "".
 
@@ -2609,6 +2643,7 @@ symbolic_expr(EA,Size,Symbol,Offset):-
 symbolic_expr_symbol_address(EA,1,Symbol,TargetEA):-
     symbolic_expr_from_relocation(EA,_,Symbol,_,TargetEA),
     !relative_table_relocation(EA),
+    !relocated_direct_target(EA,_,_),
     Symbol != "",
     defined_symbol(TargetEA,_,_,_,_,_,_,_,Symbol).
 
