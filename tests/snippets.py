@@ -111,7 +111,9 @@ def snippet_bounds(module: gtirb.Module) -> typing.Tuple[int, int]:
         if sym.referent.address is None:
             raise SnippetTestException(f"No address: '{sym_name}'")
 
-        bounds.append(sym.referent.address)
+        bounds.append(
+            sym.referent.address + (sym.referent.size if sym.at_end else 0)
+        )
     return tuple(bounds)
 
 
