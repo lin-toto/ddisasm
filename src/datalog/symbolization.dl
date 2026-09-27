@@ -263,7 +263,12 @@ symbolic_operand_candidate(EA,Op_index,Dest,Type):-
     // Unnamed section symbols are resolved by symbolic_expr_from_relocation;
     // name-only matching would confuse every section with the same empty name.
     SymbolType != "SECTION",
-    Dest = as(as(SymbolAddr,number)+Addend,address),
+    // Match the actual operand address, including the distance from a retained
+    // x86 PC-relative relocation field to the end of its instruction. A raw
+    // S+A candidate can otherwise invent a data reference just before the
+    // real object and incorrectly truncate an adjacent relative jump table.
+    relocation_adjustment_total(EA+Offset,Adjustment),
+    Dest = as(as(SymbolAddr,number)+Addend+Adjustment,address),
     (
         code(Dest), Type = "code"
         ;
