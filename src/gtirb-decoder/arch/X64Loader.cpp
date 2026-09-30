@@ -48,6 +48,7 @@ void X64Loader::decode(BinaryFacts& Facts, const uint8_t* Bytes, uint64_t Size, 
         Facts.Instructions.add(*Instruction);
         loadRegisterAccesses(Facts, Addr, *CsInsn);
         loadVectorAccesses(Facts, *CsInsn);
+        loadFlagAccesses(Facts, *CsInsn);
     }
     else
     {
@@ -275,4 +276,117 @@ void X64Loader::loadVectorAccesses(BinaryFacts& Facts, const cs_insn& Insn)
             Access("ZMM" + N + "H", "W");
             if(Op == "VZEROALL") Access("XMM" + N, "W");
         }
+}
+
+void X64Loader::loadFlagAccesses(BinaryFacts& Facts, const cs_insn& Insn)
+{
+    // Capstone's per-flag read (TEST, PRIOR) and write (MODIFY, RESET, SET,
+    // UNDEFINED) bits. An undefined result replaces the flag's value too.
+    struct Flag
+    {
+        const char* Name;
+        uint64_t Read, Write;
+    };
+    static const Flag Flags[] = {
+        {"CF", X86_EFLAGS_TEST_CF | X86_EFLAGS_PRIOR_CF,
+         X86_EFLAGS_MODIFY_CF | X86_EFLAGS_RESET_CF | X86_EFLAGS_SET_CF | X86_EFLAGS_UNDEFINED_CF},
+        {"PF", X86_EFLAGS_TEST_PF | X86_EFLAGS_PRIOR_PF,
+         X86_EFLAGS_MODIFY_PF | X86_EFLAGS_RESET_PF | X86_EFLAGS_SET_PF | X86_EFLAGS_UNDEFINED_PF},
+        {"AF", X86_EFLAGS_TEST_AF | X86_EFLAGS_PRIOR_AF,
+         X86_EFLAGS_MODIFY_AF | X86_EFLAGS_RESET_AF | X86_EFLAGS_SET_AF | X86_EFLAGS_UNDEFINED_AF},
+        {"ZF", X86_EFLAGS_TEST_ZF | X86_EFLAGS_PRIOR_ZF,
+         X86_EFLAGS_MODIFY_ZF | X86_EFLAGS_RESET_ZF | X86_EFLAGS_SET_ZF | X86_EFLAGS_UNDEFINED_ZF},
+        {"SF", X86_EFLAGS_TEST_SF | X86_EFLAGS_PRIOR_SF,
+         X86_EFLAGS_MODIFY_SF | X86_EFLAGS_RESET_SF | X86_EFLAGS_SET_SF | X86_EFLAGS_UNDEFINED_SF},
+        {"OF", X86_EFLAGS_TEST_OF | X86_EFLAGS_PRIOR_OF,
+         X86_EFLAGS_MODIFY_OF | X86_EFLAGS_RESET_OF | X86_EFLAGS_SET_OF | X86_EFLAGS_UNDEFINED_OF},
+    };
+    const unsigned All = 63, CF = 1, PF = 2, ZF = 8, OF = 32;
+    const uint64_t UntrackedReads = X86_EFLAGS_TEST_TF | X86_EFLAGS_PRIOR_TF | X86_EFLAGS_TEST_IF
+                                    | X86_EFLAGS_PRIOR_IF | X86_EFLAGS_TEST_DF | X86_EFLAGS_PRIOR_DF
+                                    | X86_EFLAGS_TEST_NT | X86_EFLAGS_PRIOR_NT | X86_EFLAGS_TEST_RF;
+    const cs_x86& X = Insn.detail->x86;
+    const std::string Op = std::get<1>(splitMnemonic(Insn));
+    unsigned Read = 0, Write = 0;
+    cs_regs RegsRead, RegsWrite;
+    uint8_t ReadCount, WriteCount;
+    if(cs_insn_group(*CsHandle, &Insn, CS_GRP_INT))
+    {
+        Read = All;
+    }
+    // Capstone 6.0.0-Alpha11 omits FCMOV's flag reads. Its eflags field is
+    // then fpu_flags, which share a union, and must not be read as flags.
+    else if(Op == "FCMOVB" || Op == "FCMOVNB")
+        Read = CF;
+    else if(Op == "FCMOVE" || Op == "FCMOVNE")
+        Read = ZF;
+    else if(Op == "FCMOVBE" || Op == "FCMOVNBE")
+        Read = CF | ZF;
+    else if(Op == "FCMOVU" || Op == "FCMOVNU")
+        Read = PF;
+    else if(cs_regs_access(*CsHandle, &Insn, RegsRead, &ReadCount, RegsWrite, &WriteCount)
+            != CS_ERR_OK)
+    {
+        Read = All;
+    }
+    else
+    {
+        // These consume the carry even where Capstone omits the read.
+        if(Op == "RCL" || Op == "RCR" || Op == "CMC")
+            Read = CF;
+        bool FlagsRead = std::find(RegsRead, RegsRead + ReadCount, X86_REG_EFLAGS)
+                         != RegsRead + ReadCount;
+        bool FlagsWritten = std::find(RegsWrite, RegsWrite + WriteCount, X86_REG_EFLAGS)
+                            != RegsWrite + WriteCount;
+        // Only an instruction that accesses the flags register has eflags;
+        // x87 status operations store fpu_flags in the same field.
+        if(FlagsRead || FlagsWritten)
+        {
+            for(unsigned I = 0; I < 6; ++I)
+            {
+                if(X.eflags & Flags[I].Read)
+                    Read |= 1u << I;
+                if(X.eflags & Flags[I].Write)
+                    Write |= 1u << I;
+            }
+            // Alpha11 marks LAHF's flags read but leaves eflags zero. ADOX
+            // similarly lists a flags read but only an OF write in eflags.
+            // A flags read with no per-flag bits reads all of them, unless it
+            // reads only an untracked flag such as DF.
+            if(Op == "LAHF")
+                Read = All & ~OF;
+            else if(!Read && !(X.eflags & UntrackedReads) && FlagsRead)
+                Read = All;
+            // A shift or rotate by a register, or by a masked count of zero,
+            // leaves the flags unchanged.
+            if((Op == "SHL" || Op == "SAL" || Op == "SHR" || Op == "SAR" || Op == "SHLD"
+                || Op == "SHRD" || Op == "ROL" || Op == "ROR" || Op == "RCL" || Op == "RCR")
+               && X.op_count > 0)
+            {
+                const cs_x86_op& Count = X.operands[X.op_count - 1];
+                const unsigned Width = X.operands[0].size * 8;
+                if(Count.type != X86_OP_IMM)
+                {
+                    Write = 0;
+                }
+                else
+                {
+                    uint64_t Effective = static_cast<uint64_t>(Count.imm) & (Width == 64 ? 63 : 31);
+                    if((Op == "ROL" || Op == "ROR") && Width)
+                        Effective %= Width;
+                    else if((Op == "RCL" || Op == "RCR") && Width && Width < 32)
+                        Effective %= Width + 1;
+                    if(Effective == 0)
+                        Write = 0;
+                }
+            }
+        }
+    }
+    for(unsigned I = 0; I < 6; ++I)
+    {
+        if(Read & (1u << I))
+            Facts.Instructions.flagAccess({gtirb::Addr(Insn.address), "R", Flags[I].Name});
+        if(Write & (1u << I))
+            Facts.Instructions.flagAccess({gtirb::Addr(Insn.address), "W", Flags[I].Name});
+    }
 }

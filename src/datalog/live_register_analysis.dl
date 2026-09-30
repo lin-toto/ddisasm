@@ -238,16 +238,106 @@ lra_live_out(EA,Reg):-
         arch.lra_return_register(Reg)
     ).
 
+// The condition flags have their own analysis below.
 lra_live_in(EA,Reg):-
-    lra_use(EA,Reg).
+    lra_use(EA,Reg),
+    !arch.lra_flag_register(Reg).
 
 lra_live_in(EA,Reg):-
     lra_live_out(EA,Reg),
-    !lra_kill(EA,Reg).
+    !lra_kill(EA,Reg),
+    !arch.lra_flag_register(Reg).
+
+// Neither the x86-64 psABI nor AAPCS64 preserves the condition flags across a
+// call. So a call kills them, and nothing is live into a return or into a
+// transfer out of the module; known callees are not entered. Branches into
+// another function's blocks still use their reads, and a transfer that the
+// CFG does not resolve keeps every flag live.
+.decl lra_flag_call(EA:address)
+
+lra_flag_call(EA):-
+    lra_instruction(EA),
+    arch.call(EA,_).
+
+.decl lra_flag_use(EA:address,Flag:symbol)
+
+lra_flag_use(EA,Flag):-
+    lra_instruction(EA),
+    arch.lra_flag_access(EA,Flag,"R").
+
+lra_flag_use(EA,Flag):-
+    lra_instruction(EA),
+    instruction(EA,_,_,Operation,_,_,_,_,_,_),
+    arch.syscall_operation(Operation),
+    arch.lra_flag(Flag).
+
+.decl lra_flag_next(EA:address,Next:address)
+
+lra_flag_next(EA,Next):-
+    code_in_refined_block(EA,Block),
+    next(EA,Next),
+    code_in_refined_block(Next,Block).
+
+lra_flag_next(EA,Dest):-
+    refined_block_last_instruction(Block,EA),
+    cfg_edge(Block,Dest,_,_,Type),
+    (Type = "branch"; Type = "fallthrough"),
+    !plt_block(Dest,_).
+
+.decl lra_flag_successor(Block:address)
+
+lra_flag_successor(Block):-
+    cfg_edge(Block,_,_,_,Type),
+    (Type = "branch"; Type = "fallthrough").
+
+lra_flag_successor(Block):-
+    cfg_edge_to_symbol(Block,_,_,_,"branch").
+
+.decl lra_flag_unknown_successor(EA:address)
+
+lra_flag_unknown_successor(EA):-
+    refined_block_last_instruction(Block,EA),
+    (
+        cfg_edge_to_top(Block,_,"branch");
+        cfg_edge_to_symbol(Block,_,_,"true","branch")
+    ).
+
+// A missing CFG edge is not evidence of a definition.
+lra_flag_unknown_successor(EA):-
+    refined_block_last_instruction(Block,EA),
+    lra_instruction(EA),
+    !arch.return(EA),
+    !arch.call(EA,_),
+    !lra_flag_successor(Block).
+
+.decl lra_flag_live_out(EA:address,Flag:symbol)
+.decl lra_flag_live_in(EA:address,Flag:symbol)
+
+lra_flag_live_out(EA,Flag):-
+    lra_flag_next(EA,Next),
+    lra_flag_live_in(Next,Flag).
+
+lra_flag_live_out(EA,Flag):-
+    lra_flag_unknown_successor(EA),
+    arch.lra_flag(Flag).
+
+lra_flag_live_in(EA,Flag):-
+    lra_flag_use(EA,Flag),
+    !lra_flag_call(EA).
+
+lra_flag_live_in(EA,Flag):-
+    lra_flag_live_out(EA,Flag),
+    !arch.lra_flag_access(EA,Flag,"W"),
+    !lra_flag_call(EA).
 
 .decl live_register(EA:address,Index:unsigned)
 .output live_register
 
 live_register(EA,Index):-
     lra_live_in(EA,Reg),
+    arch.lra_register(Reg,Index,_).
+
+live_register(EA,Index):-
+    lra_flag_live_in(EA,_),
+    arch.lra_flag_register(Reg),
     arch.lra_register(Reg,Index,_).

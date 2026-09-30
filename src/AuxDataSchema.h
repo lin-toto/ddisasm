@@ -148,6 +148,14 @@ namespace gtirb
             typedef std::map<gtirb::Offset, uint64_t> Type;
         };
 
+        /// The rule the flags bit of LiveRegisterSets follows. "call-boundary":
+        /// the flags are tracked one by one and die at every call and return.
+        struct LiveRegisterFlagRule
+        {
+            static constexpr const char* Name = "liveRegisterFlagRule";
+            typedef std::string Type;
+        };
+
         /// \brief Auxiliary data mapping PE load configuration field names to number values.
         struct PeLoadConfig
         {

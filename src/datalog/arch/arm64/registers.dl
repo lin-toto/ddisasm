@@ -105,5 +105,13 @@ arch.lra_register_write_kills(RegIn,Reg):-
     reg_map(RegIn,Reg),
     arch.lra_register(Reg,_,_).
 
+// LRA tracks NZCV as one flag.
+arch.lra_flag("NZCV").
+arch.lra_flag_register("NZCV").
+
+arch.lra_flag_access(EA,"NZCV",Mode):-
+    register_access(EA,RegIn,Mode),
+    reg_map(RegIn,"NZCV").
+
 // Register accesses come from the native decoder, including aliases, stores,
 // test branches and X30 at returns; no Capstone-5 access overrides are needed.

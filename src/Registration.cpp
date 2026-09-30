@@ -70,6 +70,7 @@ void registerAuxDataTypes()
     gtirb::AuxDataContainer::registerAuxDataType<LiveRegisterNames>();
     gtirb::AuxDataContainer::registerAuxDataType<LiveRegisterSets>();
     gtirb::AuxDataContainer::registerAuxDataType<LiveRegisterSetsHigh>();
+    gtirb::AuxDataContainer::registerAuxDataType<LiveRegisterFlagRule>();
     gtirb::AuxDataContainer::registerAuxDataType<RiscvUnresolvedPcrelReferences>();
     gtirb::AuxDataContainer::registerAuxDataType<PeLoadConfig>();
     gtirb::AuxDataContainer::registerAuxDataType<PeImportedSymbols>();

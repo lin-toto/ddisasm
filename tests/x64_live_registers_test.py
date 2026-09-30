@@ -49,7 +49,9 @@ class X64LiveRegistersTest(unittest.TestCase):
                         self.assertTrue(live[gtirb.Offset(block, instruction.address - block.address)] & bit)
 
     def test_arithmetic_flags_kills_and_preserved_inputs(self):
-        # Expected liveness immediately before the writer. ADC/SBB replace all
+        # Expected liveness immediately before the writer, with SETO reading
+        # only OF after it. Flags are tracked one by one: the writer kills the
+        # flags only if it replaces OF and reads no flag. ADC/SBB replace all
         # arithmetic outputs but still consume the incoming carry flag.
         cases = (
             ("add", "add %rbx, %rax", False),
@@ -61,8 +63,8 @@ class X64LiveRegistersTest(unittest.TestCase):
             ("lock_add", "lock add %rbx, (%rax)", False),
             ("adc", "adc %rbx, %rax", True),
             ("sbb", "sbb %rbx, %rax", True),
-            ("inc", "inc %rax", True),
-            ("dec", "dec %rax", True),
+            ("inc", "inc %rax", False),
+            ("dec", "dec %rax", False),
             ("clc", "clc", True),
             ("stc", "stc", True),
             ("cmc", "cmc", True),
@@ -72,13 +74,16 @@ class X64LiveRegistersTest(unittest.TestCase):
             ("variable_shift", "shl %cl, %rax", True),
             ("zero_shift", "shl $0, %rax", True),
             ("masked_shift", "shl $64, %rax", True),
-            ("rotate", "rol $1, %rax", True),
+            ("wide_shift", "shr $32, %rax", False),
+            ("rotate", "rol $1, %rax", False),
+            ("whole_rotate", "rol $16, %ax", True),
             ("adcx", "adcx %rbx, %rax", True),
             ("adox", "adox %rbx, %rax", True),
-            ("and", "and %rbx, %rax", True),
-            ("or", "or %rbx, %rax", True),
-            ("xor", "xor %rbx, %rax", True),
-            ("test", "test %rbx, %rax", True),
+            ("and", "and %rbx, %rax", False),
+            ("or", "or %rbx, %rax", False),
+            ("xor", "xor %rbx, %rax", False),
+            ("test", "test %rbx, %rax", False),
+            ("lahf", "lahf", True),
         )
         source = ".text\n.globl _start\n.type _start, @function\n_start:\n"
         source += "".join(f"call check_{name}\n" for name, _, _ in cases)
@@ -103,6 +108,8 @@ class X64LiveRegistersTest(unittest.TestCase):
             subprocess.run(["gcc", "-nostdlib", "-no-pie", str(assembly),
                             "-o", str(binary)], check=True)
             module = disassemble(binary).ir().modules[0]
+            # Consumers use the flags bit as it is only under this rule.
+            self.assertEqual(module.aux_data["liveRegisterFlagRule"].data, "call-boundary")
             flag_bit = 1 << module.aux_data["liveRegisterNames"].data.index("rflags")
             live = module.aux_data["liveRegisterSets"].data
             decoder = GtirbInstructionDecoder(gtirb.Module.ISA.X64)

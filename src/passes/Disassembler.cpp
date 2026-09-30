@@ -872,6 +872,7 @@ void buildLiveRegisters(gtirb::Module &Module, souffle::SouffleProgram &Program)
     Module.removeAuxData<gtirb::schema::LiveRegisterNames>();
     Module.removeAuxData<gtirb::schema::LiveRegisterSets>();
     Module.removeAuxData<gtirb::schema::LiveRegisterSetsHigh>();
+    Module.removeAuxData<gtirb::schema::LiveRegisterFlagRule>();
     if(RegisterNames.empty())
     {
         return;
@@ -924,6 +925,7 @@ void buildLiveRegisters(gtirb::Module &Module, souffle::SouffleProgram &Program)
     Module.addAuxData<gtirb::schema::LiveRegisterSets>(std::move(RegisterSets));
     if(Wide)
         Module.addAuxData<gtirb::schema::LiveRegisterSetsHigh>(std::move(RegisterSetsHigh));
+    Module.addAuxData<gtirb::schema::LiveRegisterFlagRule>(std::string("call-boundary"));
 }
 
 // Create DataObjects for labeled objects in the BSS sections, without adding

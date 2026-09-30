@@ -268,6 +268,11 @@ AccessMode may be "R" or "W"
 .decl vector_register_access(EA:address,Register:register,AccessMode:access_mode)
 .input vector_register_access
 
+// x64 condition flags CF, PF, AF, ZF, SF and OF, one fact per flag, for
+// live-register analysis: R reads the flag and W replaces it.
+.decl flag_access(EA:address,Flag:symbol,AccessMode:access_mode)
+.input flag_access
+
 /**
 The operand at index Index is accessed at EA with AccessMode
 */

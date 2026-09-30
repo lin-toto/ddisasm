@@ -22,6 +22,7 @@ TEST(LiveRegistersTest, OverlappingBlocks)
     gtirb::AuxDataContainer::registerAuxDataType<gtirb::schema::LiveRegisterNames>();
     gtirb::AuxDataContainer::registerAuxDataType<gtirb::schema::LiveRegisterSets>();
     gtirb::AuxDataContainer::registerAuxDataType<gtirb::schema::LiveRegisterSetsHigh>();
+    gtirb::AuxDataContainer::registerAuxDataType<gtirb::schema::LiveRegisterFlagRule>();
     auto Program = std::unique_ptr<souffle::SouffleProgram>(
         souffle::ProgramFactory::newInstance("souffle_disasm_x86_64"));
     ASSERT_NE(Program, nullptr);
@@ -61,6 +62,9 @@ TEST(LiveRegistersTest, OverlappingBlocks)
     EXPECT_EQ(Masks->count(gtirb::Offset(Second->getUUID(), 5)), 0);
     EXPECT_EQ(Masks->count(gtirb::Offset(Short->getUUID(), 4)), 0);
     EXPECT_EQ(Masks->size(), 5);
+    const auto *FlagRule = Module->getAuxData<gtirb::schema::LiveRegisterFlagRule>();
+    ASSERT_NE(FlagRule, nullptr);
+    EXPECT_EQ(*FlagRule, "call-boundary");
 
     EXPECT_EQ(Module->getAuxData<gtirb::schema::LiveRegisterSetsHigh>(), nullptr);
     DatalogIO::insertTuple("119\tk7", *Program, Program->getRelation("live_register_name"));

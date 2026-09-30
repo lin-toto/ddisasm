@@ -587,6 +587,26 @@ lra_extra_use(0,""):-
     false.
 
 /**
+Condition flags that live-register analysis tracks one by one. Any live flag
+sets the bit of the flags register Reg.
+*/
+.decl lra_flag(Flag:symbol)
+
+lra_flag(""):-
+    false.
+
+.decl lra_flag_register(Reg:register)
+
+lra_flag_register(""):-
+    false.
+
+/** Flag is read (R) or replaced (W) at EA. */
+.decl lra_flag_access(EA:address,Flag:symbol,AccessMode:access_mode)
+
+lra_flag_access(0,"",""):-
+    false.
+
+/**
 Floating-point registers
 */
 .decl float_reg(Reg:register,Size:unsigned)

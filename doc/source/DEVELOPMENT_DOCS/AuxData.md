@@ -75,16 +75,28 @@ the argument summary. Unresolved indirect branches keep all pieces live.
 This does not change the existing interprocedural GPR flow below, and is not
 a Windows vector ABI model (non-ELF vector masks stay conservative).
 
-X64 `rflags` tracks the six arithmetic flags (CF/PF/AF/ZF/SF/OF), not DF or
-other control flags. ADD, SUB, CMP, NEG, ADC and SBB completely define this
-value; ADC/SBB still require their incoming carry. Partial writes, shifts and
-instructions with undefined outputs remain conservative. Consumers must
-preserve non-arithmetic flags independently if they modify them. External-call
-ABI summaries remain separate from this instruction-write rule.
+X64 `rflags` is live when any of the six arithmetic flags (CF/PF/AF/ZF/SF/OF)
+is live. They are tracked one by one, from Capstone's per-flag reads and writes;
+an undefined result replaces a flag too. DF and other control flags are not
+tracked, so consumers must preserve them independently if they modify them.
+ARM64 `nzcv` is tracked as one flag.
 
-Direct transfers to defined weak symbols keep all tracked non-vector registers live.
-Relinking may replace their implementation, so the current body cannot justify
-discarding inputs. Ordinary non-weak internal calls still use callee dataflow.
+Neither the x86-64 psABI nor AAPCS64 preserves the flags across a call. So every
+call kills them, and none is live into a return or into a transfer out of the
+module; flag flow does not enter known callees. A branch into another
+function's blocks uses their reads, and a system call, an unresolved branch or
+a block without a successor keeps every flag live.
+
+**liveRegisterFlagRule** (`std::string`, `unsanctioned`) accompanies these
+tables and names the rule the flags bit follows. `call-boundary` is the rule
+above. Without it, as in lifts from earlier versions, the flags bit is not safe
+to use as it is: those versions missed flag reads that Capstone omits, such as
+FCMOV's and RCL's.
+
+Direct transfers to defined weak symbols keep all tracked non-vector registers
+except the flags live. Relinking may replace their implementation, so the
+current body cannot justify discarding inputs. Ordinary non-weak internal calls
+still use callee dataflow for the other registers.
 
 ## riscvUnresolvedPcrelReferences
 

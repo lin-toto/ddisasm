@@ -225,26 +225,20 @@ arch.lra_register_write_kills(RegIn,Reg):-
     arch.register_size_bytes(RegIn,Size),
     Size >= 4,
     reg_map(RegIn,Reg),
-    // A register-width check alone cannot establish a complete flags write.
-    !condition_flags_reg(Reg),
     arch.lra_register(Reg,_,_).
 
-// LRA tracks CF/PF/AF/ZF/SF/OF as RFLAGS, not DF or other control flags.
-// Mark only complete, unconditional arithmetic definitions as full writes.
-// ADC/SBB's incoming carry is still a use, so lra_kill cannot discard it.
-// Partial/conditional writes and undefined outputs remain conservative.
-arch.register_access_override(EA,"RFLAGS","W",1):-
-    instruction(EA,_,_,Operation,_,_,_,_,_,_),
-    (
-        Operation = "ADD";
-        Operation = "SUB";
-        Operation = "CMP";
-        Operation = "NEG";
-        Operation = "ADC";
-        Operation = "SBB"
-    ),
-    register_access(EA,RegIn,"W"),
-    reg_map(RegIn,"RFLAGS").
+// LRA tracks CF, PF, AF, ZF, SF and OF one by one, not DF or other control
+// flags, and reports them in the RFLAGS bit.
+arch.lra_flag("CF").
+arch.lra_flag("PF").
+arch.lra_flag("AF").
+arch.lra_flag("ZF").
+arch.lra_flag("SF").
+arch.lra_flag("OF").
+arch.lra_flag_register("RFLAGS").
+
+arch.lra_flag_access(EA,Flag,Mode):-
+    flag_access(EA,Flag,Mode).
 
 // A conditional move retains the old destination value when its condition is false.
 arch.lra_extra_use(EA,Reg):-

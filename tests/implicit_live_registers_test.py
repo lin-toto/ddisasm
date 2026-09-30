@@ -6,6 +6,9 @@ from pathlib import Path
 
 import gtirb
 
+# Condition flags die at every call, even where other registers stay live.
+FLAGS = {"gcc": ("rflags",), "aarch64-linux-gnu-gcc": ("nzcv",), "riscv64-linux-gnu-gcc": ()}
+
 
 class ImplicitLiveRegistersTest(unittest.TestCase):
     disassembly_options = ()
@@ -40,6 +43,8 @@ class ImplicitLiveRegistersTest(unittest.TestCase):
             names = module.aux_data["liveRegisterNames"].data
             required = (1 << len(names)) - 1 if expected is None else sum(
                 1 << names.index(name) for name in expected)
+            for name in absent:
+                required &= ~(1 << names.index(name))
             for mask in masks:
                 self.assertEqual(mask & required, required)
                 for name in absent:
@@ -96,12 +101,15 @@ class ImplicitLiveRegistersTest(unittest.TestCase):
                 with self.subTest(compiler=compiler, transfer=transfer):
                     # Unknown x64 calls use the vector ABI but retain the
                     # conservative GPR policy. Unknown jumps have no ABI.
-                    expected = None
+                    expected, absent = None, ()
+                    if transfer == transfers[0]:
+                        absent = FLAGS[compiler]
                     if compiler == "gcc" and transfer.startswith("call"):
                         expected = ("rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp",
                                     "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
-                                    "rflags", *(f"xmm{i}" for i in range(8)))
-                    self.check_mask(compiler, f"probe: {transfer}\n{ret}\n", expected)
+                                    *(f"xmm{i}" for i in range(8)))
+                    self.check_mask(compiler, f"probe: {transfer}\n{ret}\n", expected,
+                                    absent=absent)
 
     def test_conditional_tail_returns_preserve_private_caller_values(self):
         cases = (
@@ -148,7 +156,8 @@ class ImplicitLiveRegistersTest(unittest.TestCase):
             with self.subTest(compiler=compiler):
                 self.check_mask(compiler, f"probe: {call}\ndone: {stop}\n"
                     ".globl helper\n.type helper,STT_FUNC\nhelper: ret\n"
-                    ".weak weak_alias\n.set weak_alias,helper\n", None)
+                    ".weak weak_alias\n.set weak_alias,helper\n", None,
+                    absent=FLAGS[compiler])
 
     def test_external_plt_calls_use_public_abi(self):
         cases = (
@@ -175,8 +184,35 @@ class ImplicitLiveRegistersTest(unittest.TestCase):
                         body = (f"probe: {transfer}\ndone: {stop}\n{binding}"
                                 f".type helper,STT_FUNC\nhelper: {ret}\n"
                                 ".size helper,.-helper\n")
+                        # A replacement also follows the ABI, which passes no flags.
                         self.check_mask(compiler, body, None if weak else (),
-                                        absent=() if weak else (scratch,))
+                                        absent=FLAGS[compiler] if weak else (scratch,))
+
+    # Flags are dead across calls and returns in both directions, including a
+    # chain containing a tail call. A branch into another function's blocks,
+    # such as a .cold part, still uses the target's reads.
+    def test_flags_die_at_calls_and_returns(self):
+        cases = (
+            ("gcc", "call helper", "jmp done", "jmp leaf", "ret", "seto %al",
+             ".type helper,@function", ".type leaf,@function"),
+            ("aarch64-linux-gnu-gcc", "bl helper", "b done", "b leaf", "ret", "cset x0,vs",
+             ".type helper,%function", ".type leaf,%function"),
+        )
+        for compiler, call, stop, tail, ret, use, helper_type, leaf_type in cases:
+            for kind in ("argument", "return", "tail-return", "branch"):
+                with self.subTest(compiler=compiler, kind=kind):
+                    expected, absent = (), FLAGS[compiler]
+                    if kind == "argument":
+                        body = f"probe: {call}\ndone: {stop}\n{helper_type}\nhelper: {use}\n{ret}\n"
+                    elif kind == "branch":
+                        body = f"probe: {tail}\n{leaf_type}\nleaf: {use}\n{ret}\n"
+                        expected, absent = FLAGS[compiler], ()
+                    else:
+                        body = f"{call}\n{use}\ndone: {stop}\n{helper_type}\nhelper:\n"
+                        if kind == "tail-return":
+                            body += f"{tail}\n{leaf_type}\nleaf:\n"
+                        body += f"probe: {ret}\n"
+                    self.check_mask(compiler, body, expected, absent=absent)
 
 
 if __name__ == "__main__":

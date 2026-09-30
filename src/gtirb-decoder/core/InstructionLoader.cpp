@@ -74,6 +74,7 @@ void InstructionLoader::insert(const BinaryFacts& Facts, souffle::SouffleProgram
     relations::insert(Program, "op_shifted_w_reg", Instructions.shiftedWithRegOps());
     relations::insert(Program, "register_access", Instructions.registerAccesses());
     relations::insert(Program, "vector_register_access", Instructions.vectorAccesses());
+    relations::insert(Program, "flag_access", Instructions.flagAccesses());
     relations::insert(Program, "op_immediate", Operands.imm());
     relations::insert(Program, "op_regdirect", Operands.reg());
     relations::insert(Program, "op_fp_immediate", Operands.fp_imm());
