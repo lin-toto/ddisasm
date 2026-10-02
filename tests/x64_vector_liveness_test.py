@@ -182,6 +182,58 @@ class X64VectorLivenessTest(unittest.TestCase):
             with self.subTest(jump=name):
                 self.assertEqual(live(name), arguments)
 
+    def test_state_saves_read_vector_state(self):
+        # FXSAVE and the XSAVE family store vector state no operand names. Each
+        # probe overwrites its registers right after the save. XRSTOR records
+        # no write (its components depend on the mask), so a later read keeps
+        # the register live across it.
+        saves = {'fxsave': 'fxsave', 'fxsave64': 'fxsave64', 'xsave': 'xsave',
+                 'xsaveopt': 'xsaveopt', 'xsavec64': 'xsavec64'}
+        asm = """.text
+        .globl _start
+        .type _start,@function
+        _start:
+          mov $60,%eax
+          xor %edi,%edi
+          syscall
+        .size _start,.-_start
+        """
+        for name, mnemonic in saves.items():
+            asm += f"""
+        .globl {name}_probe
+        .type {name}_probe,@function
+        {name}_probe:
+          {mnemonic} (%rdi)
+          pxor %xmm8,%xmm8
+          movaps %xmm8,(%rsi)
+          vpxord %zmm20,%zmm20,%zmm20
+          vmovdqu64 %zmm20,(%rsi)
+          kxorw %k5,%k5,%k5
+          kmovq %k5,(%rsi)
+          ret
+        .size {name}_probe,.-{name}_probe
+        """
+        asm += """
+        .globl xrstor_probe
+        .type xrstor_probe,@function
+        xrstor_probe:
+          xrstor (%rdi)
+          movaps %xmm8,(%rsi)
+          ret
+        .size xrstor_probe,.-xrstor_probe
+        .section .note.GNU-stack,"",@progbits
+        """
+        live = self._vector_liveness(asm, ['-Wl,--emit-relocs'])
+        for name in saves:
+            with self.subTest(save=name):
+                self.assertIn('xmm8', live(name + '_probe'))
+                if name.startswith('xsave'):
+                    self.assertTrue({'xmm20', 'ymm20h', 'zmm20h', 'k5'} <= live(name + '_probe'))
+                else:
+                    # FXSAVE stores no upper halves, no xmm16-31 and no k registers.
+                    self.assertFalse({'xmm20', 'ymm20h', 'zmm20h', 'k5'} & live(name + '_probe'))
+        self.assertIn('xmm8', live('xrstor_probe'))
+
     def test_ipa_register_allocation_through_local_calls(self):
         # The critical part of GCC -O2 -fipa-ra ipara5/ipara6: high vectors
         # remain live at a branch before a leaf call. A transitive tail callee

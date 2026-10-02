@@ -176,6 +176,35 @@ void X64Loader::loadVectorAccesses(BinaryFacts& Facts, const cs_insn& Insn)
         return (Reg >= X86_REG_XMM0 && Reg <= X86_REG_ZMM31)
                || (Reg >= X86_REG_K0 && Reg <= X86_REG_K7);
     };
+    // FXSAVE and the XSAVE family store vector state that no operand names:
+    // Capstone lists only their address registers. Record a read of every
+    // piece they can store (FXSAVE: XMM0-15 in 64-bit mode; XSAVE*: whatever
+    // XCR0 and the instruction mask select, so every piece). The restore forms
+    // write a mask-dependent set; recording no write for them is conservative.
+    bool FxSave = Op == "FXSAVE" || Op == "FXSAVE64";
+    bool XSave = Op.rfind("XSAVE", 0) == 0;
+    if(FxSave || XSave)
+    {
+        for(unsigned I = 0; I < (XSave ? 32u : 16u); ++I)
+        {
+            auto N = std::to_string(I);
+            Facts.Instructions.vectorAccess({gtirb::Addr(Insn.address), "R", "XMM" + N});
+            if(XSave)
+            {
+                Facts.Instructions.vectorAccess({gtirb::Addr(Insn.address), "R", "YMM" + N + "H"});
+                Facts.Instructions.vectorAccess({gtirb::Addr(Insn.address), "R", "ZMM" + N + "H"});
+            }
+        }
+        if(XSave)
+        {
+            for(unsigned I = 0; I < 8; ++I)
+            {
+                Facts.Instructions.vectorAccess(
+                    {gtirb::Addr(Insn.address), "R", "K" + std::to_string(I)});
+            }
+        }
+        return;
+    }
     bool HasVectorOperand = false;
     for(unsigned I = 0; I < X.op_count; ++I)
         HasVectorOperand |= (X.operands[I].type == X86_OP_REG && IsVector(X.operands[I].reg))
