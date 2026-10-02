@@ -175,6 +175,18 @@ lra_use(EA,Reg):-
 .decl lra_vector_call(EA:address)
 lra_vector_call(EA):- lra_external_call(EA).
 lra_vector_call(EA):- lra_instruction(EA), (indirect_call(EA); reg_call(EA,_)).
+// A jump through a PLT stub or a GOT entry passes vector arguments like an
+// external call; the indirect-jump rule above keeps only GPRs. plt_entry is the
+// jump in each PLT stub, which an ordinary tail call (jmp foo@plt) reaches. It
+// also covers stubs whose target the CFG follows into the module: an ifunc
+// resolver (IRELATIVE) or a DSO's interposable definition. The rule below
+// covers a GOT jump to an external symbol, such as the jmp *foo@GOTPCREL(%rip)
+// that -fno-plt code emits.
+lra_vector_call(EA):- plt_entry(EA,_).
+lra_vector_call(EA):-
+    refined_block_last_instruction(Block,EA),
+    lra_instruction(EA),
+    cfg_edge_to_symbol(Block,_,_,"true","branch").
 
 lra_use(EA,Reg):-
     lra_vector_call(EA), arch.lra_vector_register(Reg), arch.lra_argument_register(Reg).

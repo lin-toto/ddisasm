@@ -1,4 +1,5 @@
 """Checkpoint liveness must distinguish preserved lanes and ABI boundaries."""
+import ctypes.util
 import shutil
 import subprocess
 import tempfile
@@ -76,6 +77,110 @@ class X64VectorLivenessTest(unittest.TestCase):
             self.assertIn('xmm12', live('callee'))
             self.assertEqual(len(live('unknown')), 104)
             self.assertEqual(live('unknown_call'), {f'xmm{i}' for i in range(8)})
+
+    @staticmethod
+    def _vector_liveness(asm, link_flags=()):
+        """Lift a probe program; return a function giving the vector registers live at a label."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'input.S').write_text(asm)
+            subprocess.run(['gcc', '-nostdlib', '-no-pie', str(root/'input.S'), *link_flags,
+                            '-o', str(root/'input')], check=True)
+            module = disassemble(root/'input').ir().modules[0]
+        names = module.aux_data['liveRegisterNames'].data
+        lo = module.aux_data['liveRegisterSets'].data
+        hi = module.aux_data['liveRegisterSetsHigh'].data
+
+        def live(name):
+            symbol = next(module.symbols_named(name))
+            off = gtirb.Offset(symbol.referent, 0)
+            mask = lo[off] | (hi[off] << 64)
+            return {n for i, n in enumerate(names) if i >= 16 and mask & (1 << i)}
+        return live
+
+    @unittest.skipUnless(ctypes.util.find_library('m'), 'a shared libm is required')
+    def test_external_tail_jumps_keep_vector_arguments(self):
+        # A tail jump through a PLT stub or a GOT entry passes vector
+        # arguments. Each probe overwrites xmm0 just before the jump, so
+        # xmm0-7 are live there only because of it. The sets are exact: an
+        # unresolved jump would keep all 104 pieces live, and a jump the CFG
+        # follows into a local body would keep only what is live there (at an
+        # ifunc resolver's ret, the return registers xmm0-1).
+        # - cos is also loaded from the GOT, so jmp cos@PLT uses a .plt.got
+        #   stub; sin is reached only through a lazy PLT stub.
+        # - vector_ifunc is an ifunc defined here, so jmp vector_ifunc uses an
+        #   IRELATIVE stub, which the CFG follows into the resolver.
+        # No --emit-relocs, for two reasons: as in a -fno-plt build, only the
+        # dynamic GOT relocation then names cos, and a retained PLT32
+        # relocation would make the cos and sin probes exact without the
+        # stub rules.
+        asm = """.text
+        .globl _start
+        .type _start,@function
+        _start:
+          mov $60,%eax
+          xor %edi,%edi
+          syscall
+        .size _start,.-_start
+        .globl got_tail
+        .type got_tail,@function
+        got_tail:
+          movsd (%rdi),%xmm0
+        .globl got_tail_jump
+        got_tail_jump:
+          jmp *cos@GOTPCREL(%rip)
+        .size got_tail,.-got_tail
+        .globl got_reg_tail
+        .type got_reg_tail,@function
+        got_reg_tail:
+          movsd (%rdi),%xmm0
+          mov cos@GOTPCREL(%rip),%rax
+        .globl got_reg_tail_jump
+        got_reg_tail_jump:
+          jmp *%rax
+        .size got_reg_tail,.-got_reg_tail
+        .globl plt_tail
+        .type plt_tail,@function
+        plt_tail:
+          movsd (%rdi),%xmm0
+        .globl plt_tail_jump
+        plt_tail_jump:
+          jmp cos@PLT
+        .size plt_tail,.-plt_tail
+        .globl lazy_plt_tail
+        .type lazy_plt_tail,@function
+        lazy_plt_tail:
+          movsd (%rdi),%xmm0
+        .globl lazy_plt_tail_jump
+        lazy_plt_tail_jump:
+          jmp sin@PLT
+        .size lazy_plt_tail,.-lazy_plt_tail
+        .type vector_impl,@function
+        vector_impl:
+          ret
+        .size vector_impl,.-vector_impl
+        .globl vector_ifunc
+        .type vector_ifunc,@gnu_indirect_function
+        vector_ifunc:
+          lea vector_impl(%rip),%rax
+          ret
+        .size vector_ifunc,.-vector_ifunc
+        .globl ifunc_tail
+        .type ifunc_tail,@function
+        ifunc_tail:
+          movsd (%rdi),%xmm0
+        .globl ifunc_tail_jump
+        ifunc_tail_jump:
+          jmp vector_ifunc
+        .size ifunc_tail,.-ifunc_tail
+        .section .note.GNU-stack,"",@progbits
+        """
+        live = self._vector_liveness(asm, ['-lm'])
+        arguments = {f'xmm{i}' for i in range(8)}
+        for name in ('got_tail_jump', 'got_reg_tail_jump', 'plt_tail_jump',
+                     'lazy_plt_tail_jump', 'ifunc_tail_jump'):
+            with self.subTest(jump=name):
+                self.assertEqual(live(name), arguments)
 
     def test_ipa_register_allocation_through_local_calls(self):
         # The critical part of GCC -O2 -fipa-ra ipara5/ipara6: high vectors
