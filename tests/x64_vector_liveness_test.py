@@ -71,12 +71,17 @@ class X64VectorLivenessTest(unittest.TestCase):
             self.assertNotIn('k7', live('zero_k'))
             self.assertEqual(live('zero_all'), set())
             self.assertTrue({'xmm31','ymm31h','zmm31h'} <= live('all_pieces'))
-            self.assertEqual(live('caller'), {'xmm0', 'xmm1', 'xmm12', 'xmm15'})
-            self.assertEqual(live('tail'), {'xmm0', 'xmm1', 'xmm12', 'xmm15'})
-            self.assertEqual(live('returns'), {'xmm0','xmm1'})
+            # This module's code accesses upper pieces, so the upper pieces of the
+            # ABI argument and result registers count as well.
+            results = {'xmm0', 'xmm1', 'ymm0h', 'zmm0h'}
+            arguments = {f'{name}{i}{piece}' for i in range(8)
+                         for name, piece in (('xmm', ''), ('ymm', 'h'), ('zmm', 'h'))}
+            self.assertEqual(live('caller'), results | {'xmm12', 'xmm15'})
+            self.assertEqual(live('tail'), results | {'xmm12', 'xmm15'})
+            self.assertEqual(live('returns'), results)
             self.assertIn('xmm12', live('callee'))
             self.assertEqual(len(live('unknown')), 104)
-            self.assertEqual(live('unknown_call'), {f'xmm{i}' for i in range(8)})
+            self.assertEqual(live('unknown_call'), arguments)
 
     @staticmethod
     def _vector_liveness(asm, link_flags=()):
@@ -181,6 +186,55 @@ class X64VectorLivenessTest(unittest.TestCase):
                      'lazy_plt_tail_jump', 'ifunc_tail_jump'):
             with self.subTest(jump=name):
                 self.assertEqual(live(name), arguments)
+
+    @unittest.skipUnless(ctypes.util.find_library('m'), 'a shared libm is required')
+    def test_upper_pieces_count_where_the_module_can_change_them(self):
+        # Legacy SSE leaves the upper pieces alone, while VEX and EVEX writes
+        # zero them and XRSTOR restores them. So a 256- or 512-bit argument or
+        # result counts only in a module whose code accesses an upper piece. The tail-jump test above covers a module
+        # with no vector code at all: exactly xmm0-7 there.
+        xmm = {f'xmm{i}' for i in range(8)}
+        ymm = {f'ymm{i}h' for i in range(8)}
+        zmm = {f'zmm{i}h' for i in range(8)}
+        # A VEX write zeroes the pieces above its destination, up to ZMM; a store
+        # of a ymm register only reads the YMM piece; XRSTOR restores them all.
+        for kind, instruction, upper in (('sse', 'addsd %xmm1,%xmm0', set()),
+                                         ('vex128', 'vaddsd %xmm1,%xmm0,%xmm0', ymm | zmm),
+                                         ('ymm', 'vmovupd (%rdi),%ymm0', ymm | zmm),
+                                         ('ymm_store', 'vmovupd %ymm1,(%rdi)', ymm),
+                                         ('zmm', 'vmovupd (%rdi),%zmm0', ymm | zmm),
+                                         ('xrstor', 'xrstor (%rsi)', ymm | zmm)):
+            asm = f""".text
+        .globl _start
+        .type _start,@function
+        _start:
+          mov $60,%eax
+          xor %edi,%edi
+          syscall
+        .size _start,.-_start
+        .globl vector_tail
+        .type vector_tail,@function
+        vector_tail:
+          {instruction}
+        .globl vector_tail_jump
+        vector_tail_jump:
+          jmp cos@PLT
+        .size vector_tail,.-vector_tail
+        .globl vector_result
+        .type vector_result,@function
+        vector_result:
+          {instruction}
+        .globl vector_result_ret
+        vector_result_ret:
+          ret
+        .size vector_result,.-vector_result
+        .section .note.GNU-stack,"",@progbits
+        """
+            live = self._vector_liveness(asm, ['-lm'])
+            with self.subTest(kind=kind):
+                self.assertEqual(live('vector_tail_jump'), xmm | upper)
+                self.assertEqual(live('vector_result_ret'),
+                                 {'xmm0', 'xmm1'} | {piece for piece in upper if piece[3] == '0'})
 
     def test_state_saves_read_vector_state(self):
         # FXSAVE and the XSAVE family store vector state no operand names. Each

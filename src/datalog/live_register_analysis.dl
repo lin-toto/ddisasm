@@ -142,10 +142,58 @@ lra_external_call(EA):-
     direct_call(EA,Dest),
     plt_block(Dest,_).
 
+// 256- and 512-bit vector arguments and results (__m256, __m512, the vector
+// math ABI) also use the upper pieces of YMM0-7 and ZMM0-7. They count as
+// arguments and results only in a module whose refined code accesses an upper
+// piece: a YMM or ZMM operand, any VEX or EVEX write to a vector register (which
+// zeroes the pieces above it), VZEROUPPER or VZEROALL, the XSAVE family, or the
+// XRSTOR family (which restores them although the loader records no write for
+// it). A ZMM piece brings the YMM one.
+// Legacy SSE leaves the upper pieces alone, so in other modules no instruction
+// of the module can change them, and counting them would only make every
+// checkpoint before a call save them. A value merely passed through such a
+// module stays unprotected where speculation continues into another
+// instrumented module that changes it.
+.decl lra_upper_vector_width(Prefix:symbol)
+
+lra_upper_vector_width(Prefix):-
+    binary_format("ELF"),
+    vector_register_access(EA,Reg,_),
+    (Prefix = "YMM"; Prefix = "ZMM"),
+    substr(Reg,0,3) = Prefix,
+    code_in_refined_block(EA,_).
+
+lra_upper_vector_width(Prefix):-
+    binary_format("ELF"),
+    code_in_refined_block(EA,_),
+    instruction_get_operation(EA,Operation),
+    substr(Operation,0,6) = "XRSTOR",
+    (Prefix = "YMM"; Prefix = "ZMM").
+
+lra_upper_vector_width("YMM"):-
+    lra_upper_vector_width("ZMM").
+
+.decl lra_abi_argument_register(Reg:register)
+
+lra_abi_argument_register(Reg):-
+    arch.lra_argument_register(Reg).
+
+lra_abi_argument_register(cat(Prefix,to_string(I),"H")):-
+    lra_upper_vector_width(Prefix),
+    I = range(0,8,1).
+
+.decl lra_abi_return_register(Reg:register)
+
+lra_abi_return_register(Reg):-
+    arch.lra_return_register(Reg).
+
+lra_abi_return_register(cat(Prefix,"0H")):-
+    lra_upper_vector_width(Prefix).
+
 // External calls consume ABI argument registers.
 lra_use(EA,Reg):-
     lra_external_call(EA),
-    arch.lra_argument_register(Reg),
+    lra_abi_argument_register(Reg),
     arch.lra_register(Reg,_,_).
 
 // A direct external tail call consumes arguments and must preserve nonvolatile
@@ -154,7 +202,7 @@ lra_use(EA,Reg):-
     refined_block_last_instruction(Block,EA),
     cfg_edge_to_symbol(Block,_,_,"false","branch"),
     (
-        arch.lra_argument_register(Reg);
+        lra_abi_argument_register(Reg);
         arch.lra_register(Reg,_,_),
         !arch.lra_caller_saved(Reg)
     ).
@@ -189,7 +237,7 @@ lra_vector_call(EA):-
     cfg_edge_to_symbol(Block,_,_,"true","branch").
 
 lra_use(EA,Reg):-
-    lra_vector_call(EA), arch.lra_vector_register(Reg), arch.lra_argument_register(Reg).
+    lra_vector_call(EA), arch.lra_vector_register(Reg), lra_abi_argument_register(Reg).
 
 // A recovered jump table has explicit CFG targets. Only genuinely unresolved
 // branches need the all-vector fallback. Unknown calls still have an ABI.
@@ -247,7 +295,7 @@ lra_live_out(EA,Reg):-
     arch.lra_register(Reg,_,_),
     (
         !arch.lra_caller_saved(Reg);
-        arch.lra_return_register(Reg)
+        lra_abi_return_register(Reg)
     ).
 
 // The condition flags have their own analysis below.
