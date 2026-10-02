@@ -69,11 +69,23 @@ Legacy definitions only kill the pieces they fully replace. VEX/EVEX writes
 also kill zeroed upper pieces; merging masks and partial low-lane writes retain
 their incoming pieces. Recognized zero idioms do not read their data inputs.
 
-System V X64 vector flow is intraprocedural: every call consumes XMM0–7 and
-clobbers all pieces; returns consume XMM0–1. Recovered internal tail calls use
-the argument summary. Unresolved indirect branches keep all pieces live.
-This does not change the existing interprocedural GPR flow below, and is not
-a Windows vector ABI model (non-ELF vector masks stay conservative).
+X64 vector liveness follows the CFG through known internal calls, returns and
+recovered tail calls. External and unknown calls use the System V summary: they
+consume XMM0–7 and clobber all pieces; returns consume XMM0–1. In a module
+whose code accesses an upper piece, the arguments also include the upper pieces
+of YMM0–7 (and of ZMM0–7 where a ZMM piece is accessed), and the results those
+of YMM0 (and ZMM0). A YMM or ZMM operand, any VEX or EVEX write to a vector
+register (which zeroes the pieces above it, up to ZMM), VZEROUPPER, VZEROALL
+and the XSAVE and XRSTOR families all count; legacy SSE does not, and leaves
+the upper pieces alone. A value merely passed through a module that accesses no
+upper piece stays unprotected where speculation continues into another
+instrumented module that changes it. A direct jump to an external symbol, the
+jump in each PLT stub, and a GOT jump to an external symbol consume the
+arguments like an external call. FXSAVE reads XMM0–15, and the XSAVE family
+reads every piece; the restore forms record no write. Calls and branches to
+weak definitions, system calls and unresolved indirect branches keep all pieces
+live. This does not change the existing interprocedural GPR flow below, and is
+not a Windows vector ABI model (non-ELF vector masks stay conservative).
 
 X64 `rflags` is live when any of the six arithmetic flags (CF/PF/AF/ZF/SF/OF)
 is live. They are tracked one by one, from Capstone's per-flag reads and writes;
@@ -93,10 +105,10 @@ above. Without it, as in lifts from earlier versions, the flags bit is not safe
 to use as it is: those versions missed flag reads that Capstone omits, such as
 FCMOV's and RCL's.
 
-Direct transfers to defined weak symbols keep all tracked non-vector registers
-except the flags live. Relinking may replace their implementation, so the
-current body cannot justify discarding inputs. Ordinary non-weak internal calls
-still use callee dataflow for the other registers.
+Direct transfers to defined weak symbols keep all tracked registers, vector
+pieces included, live except the flags. Relinking may replace their
+implementation, so the current body cannot justify discarding inputs. Ordinary
+non-weak internal calls still use callee dataflow for the other registers.
 
 ## riscvUnresolvedPcrelReferences
 
