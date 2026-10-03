@@ -93,22 +93,32 @@ an undefined result replaces a flag too. DF and other control flags are not
 tracked, so consumers must preserve them independently if they modify them.
 ARM64 `nzcv` is tracked as one flag.
 
-Neither the x86-64 psABI nor AAPCS64 preserves the flags across a call. So every
-call kills them, and none is live into a return or into a transfer out of the
-module; flag flow does not enter known callees. A branch into another
-function's blocks uses their reads, and a system call, an unresolved branch or
-a block without a successor keeps every flag live.
+Neither the x86-64 psABI nor AAPCS64 preserves the flags across a call. So the
+flags live after a call are dead before it, and none is live into a return or
+into a transfer out of the module. A callee may still read flags that its
+caller set, and handwritten assembly does: OpenSSL's `__rsaz_512_mulx` begins
+with an ADC that consumes the carry its callers' `cmp; je` leaves. So at a
+direct call to a known function in the module, the flags live at the callee's
+entry are live. Indirect calls (resolved ones included), calls through a PLT
+stub and calls out of the module pass no flag. A branch into another function's
+blocks uses their reads, and a system call, an unresolved branch or a block
+without a successor keeps every flag live.
 
 **liveRegisterFlagRule** (`std::string`, `unsanctioned`) accompanies these
-tables and names the rule the flags bit follows. `call-boundary` is the rule
-above. Without it, as in lifts from earlier versions, the flags bit is not safe
+tables and names the rule the flags bit follows. `callee-entry` is the rule
+above. Earlier lifts said `call-boundary` and killed every flag at a direct
+call as well, so their bit can be dead where a callee reads its caller's flags;
+a consumer that needs the rule above must refuse them. Without
+the table, as in lifts from still earlier versions, the flags bit is not safe
 to use as it is: those versions missed flag reads that Capstone omits, such as
 FCMOV's and RCL's.
 
 Direct transfers to defined weak symbols keep all tracked registers, vector
-pieces included, live except the flags. Relinking may replace their
-implementation, so the current body cannot justify discarding inputs. Ordinary
-non-weak internal calls still use callee dataflow for the other registers.
+pieces included, live. Relinking may replace their implementation, so the
+current body cannot justify discarding inputs. The flags follow the rule above:
+a replacement also follows the ABI, which passes none, so only the current
+body's reads count. Ordinary non-weak internal calls still use callee dataflow
+for the other registers.
 
 ## riscvUnresolvedPcrelReferences
 

@@ -148,8 +148,10 @@ namespace gtirb
             typedef std::map<gtirb::Offset, uint64_t> Type;
         };
 
-        /// The rule the flags bit of LiveRegisterSets follows. "call-boundary":
-        /// the flags are tracked one by one and die at every call and return.
+        /// The rule the flags bit of LiveRegisterSets follows. "callee-entry":
+        /// the flags are tracked one by one, none is live into a return, and a
+        /// call passes on only what a direct callee in the module reads first.
+        /// Earlier lifts said "call-boundary": every call killed the flags.
         struct LiveRegisterFlagRule
         {
             static constexpr const char* Name = "liveRegisterFlagRule";

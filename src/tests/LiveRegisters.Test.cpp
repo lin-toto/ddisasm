@@ -64,7 +64,7 @@ TEST(LiveRegistersTest, OverlappingBlocks)
     EXPECT_EQ(Masks->size(), 5);
     const auto *FlagRule = Module->getAuxData<gtirb::schema::LiveRegisterFlagRule>();
     ASSERT_NE(FlagRule, nullptr);
-    EXPECT_EQ(*FlagRule, "call-boundary");
+    EXPECT_EQ(*FlagRule, "callee-entry");
 
     EXPECT_EQ(Module->getAuxData<gtirb::schema::LiveRegisterSetsHigh>(), nullptr);
     DatalogIO::insertTuple("119\tk7", *Program, Program->getRelation("live_register_name"));

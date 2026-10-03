@@ -6,7 +6,8 @@ from pathlib import Path
 
 import gtirb
 
-# Condition flags die at every call, even where other registers stay live.
+# Condition flags die at calls whose callee does not read them first (or is
+# unknown or outside the module), even where other registers stay live.
 FLAGS = {"gcc": ("rflags",), "aarch64-linux-gnu-gcc": ("nzcv",), "riscv64-linux-gnu-gcc": ()}
 
 
@@ -188,10 +189,11 @@ class ImplicitLiveRegistersTest(unittest.TestCase):
                         self.check_mask(compiler, body, None if weak else (),
                                         absent=FLAGS[compiler] if weak else (scratch,))
 
-    # Flags are dead across calls and returns in both directions, including a
-    # chain containing a tail call. A branch into another function's blocks,
-    # such as a .cold part, still uses the target's reads.
-    def test_flags_die_at_calls_and_returns(self):
+    # Flags die at returns, so none passes back to a return site, including
+    # through a chain containing a tail call. A direct call passes on what its
+    # callee reads first (argument). A branch into another function's blocks,
+    # such as a .cold part, also uses the target's reads.
+    def test_flags_at_calls_and_returns(self):
         cases = (
             ("gcc", "call helper", "jmp done", "jmp leaf", "ret", "seto %al",
              ".type helper,@function", ".type leaf,@function"),
@@ -204,6 +206,7 @@ class ImplicitLiveRegistersTest(unittest.TestCase):
                     expected, absent = (), FLAGS[compiler]
                     if kind == "argument":
                         body = f"probe: {call}\ndone: {stop}\n{helper_type}\nhelper: {use}\n{ret}\n"
+                        expected, absent = FLAGS[compiler], ()
                     elif kind == "branch":
                         body = f"probe: {tail}\n{leaf_type}\nleaf: {use}\n{ret}\n"
                         expected, absent = FLAGS[compiler], ()
@@ -213,6 +216,25 @@ class ImplicitLiveRegistersTest(unittest.TestCase):
                             body += f"{tail}\n{leaf_type}\nleaf:\n"
                         body += f"probe: {ret}\n"
                     self.check_mask(compiler, body, expected, absent=absent)
+
+    # A call to an ifunc goes through an IRELATIVE PLT stub, which passes no
+    # flags even where the CFG follows the stub into a resolver that reads
+    # them. ARM64 IRELATIVE stubs are no plt_block: their GOT relocation names
+    # no symbol.
+    def test_ifunc_stub_calls_pass_no_flags(self):
+        cases = (
+            ("gcc", "mov $60,%eax\nxor %edi,%edi\nsyscall\n", "setb %al\nlea impl(%rip),%rax\nret\n",
+             "cmp $1,%rdi\nje 1f\nret\n1: mov $5,%rsi\nprobe: call selector\nret\n", "@"),
+            ("aarch64-linux-gnu-gcc", "mov x8,#93\nmov x0,#0\nsvc #0\n",
+             "cset x1,eq\nadrp x0,impl\nadd x0,x0,:lo12:impl\nret\n",
+             "cmp x0,#1\nb.eq 1f\nret\n1: mov x1,#5\nprobe: bl selector\nret\n", "%"),
+        )
+        for compiler, exit_call, resolver, caller, kind in cases:
+            with self.subTest(compiler=compiler):
+                body = (f"{exit_call}.type impl,{kind}function\nimpl: ret\n"
+                        f".globl selector\n.type selector,{kind}gnu_indirect_function\nselector:\n{resolver}"
+                        f".type ifunc_caller,{kind}function\nifunc_caller:\n{caller}")
+                self.check_mask(compiler, body, (), absent=FLAGS[compiler])
 
 
 if __name__ == "__main__":

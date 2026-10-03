@@ -309,10 +309,16 @@ lra_live_in(EA,Reg):-
     !arch.lra_flag_register(Reg).
 
 // Neither the x86-64 psABI nor AAPCS64 preserves the condition flags across a
-// call. So a call kills them, and nothing is live into a return or into a
-// transfer out of the module; known callees are not entered. Branches into
-// another function's blocks still use their reads, and a transfer that the
-// CFG does not resolve keeps every flag live.
+// call. So the flags live at a return site are dead at the call, and nothing
+// is live into a return or into a transfer out of the module. A callee may
+// still read flags that its caller set, and handwritten assembly does:
+// OpenSSL's rsaz_512_mul reaches `call __rsaz_512_mulx` through `cmp; je`,
+// and the callee's first flag access is an ADC that consumes the carry left by
+// the CMP. So at a direct call to a known callee in the module, the flags live
+// at the callee's entry are live. Indirect calls (resolved ones included),
+// calls through a PLT stub and calls out of the module keep the ABI assumption
+// and pass no flag. Branches into another function's blocks still use their
+// reads, and a transfer that the CFG does not resolve keeps every flag live.
 .decl lra_flag_call(EA:address)
 
 lra_flag_call(EA):-
@@ -389,6 +395,31 @@ lra_flag_live_in(EA,Flag):-
     lra_flag_live_out(EA,Flag),
     !arch.lra_flag_access(EA,Flag,"W"),
     !lra_flag_call(EA).
+
+// A PLT stub, even one that the CFG follows into the module (an ifunc resolver
+// or an interposable definition). plt_block misses ARM64 IRELATIVE stubs, whose
+// GOT relocation names no symbol, so every block in a PLT section counts too.
+.decl lra_flag_plt_target(Block:address)
+
+lra_flag_plt_target(Block):-
+    plt_block(Block,_).
+
+lra_flag_plt_target(Block):-
+    refined_block(Block),
+    plt_section(SecName),
+    loaded_section(Beg,End,SecName),
+    Block >= Beg,
+    Block < End.
+
+// A direct call passes on what its callee's entry reads (see lra_flag_call).
+// Indirect "false" excludes register calls and jump-table calls that the CFG
+// resolves.
+lra_flag_live_in(EA,Flag):-
+    lra_flag_call(EA),
+    refined_block_last_instruction(Block,EA),
+    cfg_edge(Block,Dest,_,"false","call"),
+    !lra_flag_plt_target(Dest),
+    lra_flag_live_in(Dest,Flag).
 
 .decl live_register(EA:address,Index:unsigned)
 .output live_register

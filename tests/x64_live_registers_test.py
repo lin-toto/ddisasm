@@ -109,7 +109,7 @@ class X64LiveRegistersTest(unittest.TestCase):
                             "-o", str(binary)], check=True)
             module = disassemble(binary).ir().modules[0]
             # Consumers use the flags bit as it is only under this rule.
-            self.assertEqual(module.aux_data["liveRegisterFlagRule"].data, "call-boundary")
+            self.assertEqual(module.aux_data["liveRegisterFlagRule"].data, "callee-entry")
             flag_bit = 1 << module.aux_data["liveRegisterNames"].data.index("rflags")
             live = module.aux_data["liveRegisterSets"].data
             decoder = GtirbInstructionDecoder(gtirb.Module.ISA.X64)

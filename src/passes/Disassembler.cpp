@@ -925,7 +925,7 @@ void buildLiveRegisters(gtirb::Module &Module, souffle::SouffleProgram &Program)
     Module.addAuxData<gtirb::schema::LiveRegisterSets>(std::move(RegisterSets));
     if(Wide)
         Module.addAuxData<gtirb::schema::LiveRegisterSetsHigh>(std::move(RegisterSetsHigh));
-    Module.addAuxData<gtirb::schema::LiveRegisterFlagRule>(std::string("call-boundary"));
+    Module.addAuxData<gtirb::schema::LiveRegisterFlagRule>(std::string("callee-entry"));
 }
 
 // Create DataObjects for labeled objects in the BSS sections, without adding
