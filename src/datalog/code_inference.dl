@@ -256,8 +256,19 @@ max_instruction_size(MaxSize):-
         instruction(_,Size,_,_,_,_,_,_,_,_)
     }.
 
+/**
+OBJECT symbols that can describe allocated bytes under the existing
+defined_symbol policy. Absolute symbols describe values, not allocated storage,
+even when their numeric value lies inside an instruction or data region.
+*/
+.decl allocated_object_symbol(Start:address,Size:unsigned,SectIndex:unsigned) inline
+
+allocated_object_symbol(Start,Size,SectIndex):-
+    defined_symbol(Start,Size,"OBJECT",_,_,SectIndex,_,_,_),
+    SectIndex != 0xfff1. // SHN_ABS
+
 invalid(Inst,"overlaps object"):-
-    defined_symbol(Start,ObjSize,"OBJECT",_,_,_,_,_,_),
+    allocated_object_symbol(Start,ObjSize,_),
     max_instruction_size(MaxInstSize),
     arch.instruction_at(EA,Inst),
     Start-MaxInstSize < EA,
@@ -1171,7 +1182,7 @@ data_block_candidate(EA,Size):-
 
 data_block_candidate(Block,Size),
 known_block(Block,"data",Size,"object symbol"):-
-    defined_symbol(Block,Size,"OBJECT",_,_,_,_,_,_),
+    allocated_object_symbol(Block,Size,_),
     Size > 0.
 
 // Hand-written assembly can declare an OBJECT without a `.size`.  When an
@@ -1183,7 +1194,7 @@ known_block(Block,"data",Size,"object symbol"):-
 .decl referenced_zero_size_object_extent(Block:address,Size:unsigned)
 
 referenced_zero_size_object_extent(Block,Next-Block):-
-    defined_symbol(Block,0,"OBJECT",_,_,SectIndex,_,_,_),
+    allocated_object_symbol(Block,0,SectIndex),
     !metadata_function_entry(Block),
     Next = min NextAddress : {
         defined_symbol(NextAddress,_,_,_,_,SectIndex,_,_,_),
