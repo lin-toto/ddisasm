@@ -1223,6 +1223,50 @@ ordered_compare_and_jump_register(EA,CC,Lhs,Rhs):-
     op_regdirect_contains_reg(OpLhs,Lhs),
     op_regdirect_contains_reg(OpRhs,Rhs).
 
+/**
+The register holding the unscaled index of a scaled RISC-V jump-table access.
+
+riscv_relative_jump_table_access names the scaled register (`slli s, idx, 2`).
+Comparisons bound the unscaled index, so the table bound must be read from the
+source of the scaling.  Without it every RV64 relative table was
+unbounded and was cut at the next data limit, which a stray address-like word
+(for example string bytes) can place inside the table.
+*/
+.decl riscv_scale_index_by_4_source(EA:address,Reg:register,Src:register)
+
+riscv_scale_index_by_4_source(EA,Reg,Src):-
+    riscv_scale_index_by_4(EA,Reg),
+    arch.reg_arithmetic_operation(EA,Reg,Src,4,0).
+
+riscv_scale_index_by_4_source(EASrli,Reg,Src):-
+    riscv_scale_index_by_4(EASrli,Reg),
+    instruction(EASlli,_,_,"SLLI",OpSrc,OpSlliImm,OpSlliDst,0,_,_),
+    op_regdirect_contains_reg(OpSlliDst,RegTmp),
+    op_regdirect_contains_reg(OpSrc,Src),
+    op_immediate(OpSlliImm,32,_),
+    reg_def_use.def_used(EASlli,RegTmp,EASrli,_).
+
+// Bound the table by the limit of the unscaled index where the scaling
+// instruction reads it.  This covers in-place scaling (`slli a0,a0,2`), where
+// the register at the load already holds the scaled address, as well as
+// scaling into a new register.
+jump_table_max(TableStart,TableStart+as(Value,unsigned)*4):-
+    riscv_relative_jump_table_access(_,TableStart,EALoad,RegScaled),
+    reg_def_use.def_used(EAAddr,RegAddr,EALoad,_),
+    arch.reg_reg_arithmetic_operation(EAAddr,RegAddr,RegScaled,_,1,0),
+    reg_def_use.def_used(EAScale,RegScaled,EAAddr,_),
+    riscv_scale_index_by_4_source(EAScale,RegScaled,RegSrc),
+    code_in_block(EAScale,Block),
+    (
+        // The unscaled index is not redefined in this block before the scaling.
+        !reg_def_use.block_last_def(EAScale,_,RegSrc),
+        last_value_reg_limit(_,Block,RegSrc,Value,"MAX",_)
+        ;
+        reg_def_use.block_last_def(EAScale,EA_def,RegSrc), UNUSED(Block),
+        last_value_reg_limit(EA_def,_,RegSrc,Value,"MAX",_)
+    ),
+    Value >= 0.
+
 jump_table_signed(TableStart,1):-
     riscv_relative_jump_table_access(_,TableStart,_,_).
 
