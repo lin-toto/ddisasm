@@ -1208,6 +1208,21 @@ riscv_relative_jump_table_access(EAJump,TableStart,EALoad,RegIndex):-
 jump_table_element_access(EALoad,4,TableStart,RegIndex):-
     riscv_relative_jump_table_access(_,TableStart,EALoad,RegIndex).
 
+/**
+RISC-V three-operand branches `bxx rs1, rs2, target` are taken iff
+`rs1 CC rs2`.  DDisasm stores them as (rs2, target, rs1).
+*/
+ordered_compare_and_jump_register(EA,CC,Lhs,Rhs):-
+    instruction(EA,_,_,Operation,OpRhs,_,OpLhs,0,_,_),
+    (
+        Operation = "BLT"; Operation = "BGE"; Operation = "BLTU"; Operation = "BGEU";
+        Operation = "BEQ"; Operation = "BNE"
+    ),
+    arch.jump(EA),
+    arch.conditional(EA,CC),
+    op_regdirect_contains_reg(OpLhs,Lhs),
+    op_regdirect_contains_reg(OpRhs,Rhs).
+
 jump_table_signed(TableStart,1):-
     riscv_relative_jump_table_access(_,TableStart,_,_).
 

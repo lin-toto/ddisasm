@@ -92,11 +92,27 @@ compare_and_jump_register(EA_cmp,EA_jmp,CC,Reg1,Reg2):-
     flags_and_jump_pair(EA_cmp,EA_jmp,CC),
     cmp_reg_to_reg(EA_cmp,Reg1,Reg2).
 
+/**
+A single compare-and-branch instruction whose operand order is known: the
+branch is taken iff `Lhs CC Rhs`.  Architecture files define it (RISC-V
+three-operand branches).  cmp_reg_to_reg is unordered and yields both operand
+orders, which gives contradictory limits for ordered conditions, so these
+branches bypass the generic register-compare limit rule and use the rule
+below.  Architectures without facts here are unaffected.
+*/
+.decl ordered_compare_and_jump_register(EA:address,CC:condition_code,Lhs:register,Rhs:register)
+
 // Single instruction that compares and branches
 compare_and_jump_register(EA,EA,CC,Reg1,Reg2):-
     cmp_reg_to_reg(EA,Reg1,Reg2),
     arch.jump(EA),
-    arch.conditional(EA,CC).
+    arch.conditional(EA,CC),
+    !ordered_compare_and_jump_register(EA,_,_,_).
+
+// Keep a single, correctly ordered tuple for the other users of
+// compare_and_jump_register (`Reg2 CC Reg1`, as for `cmp Reg1,Reg2`).
+compare_and_jump_register(EA,EA,CC,Rhs,Lhs):-
+    ordered_compare_and_jump_register(EA,CC,Lhs,Rhs).
 
 /**
 A pair of instructions that compares a memory location to an immediate and then
@@ -187,10 +203,51 @@ value_reg_limit(EA_jmp,EA_fallthrough,Reg,FallthroughValue,FallthroughLT):-
     BranchValue = Immediate + BranchOffset,
     FallthroughValue = Immediate + FallthroughOffset.
 
+/**
+`A CC B` is equivalent to `B CC' A`.
+*/
+.decl swapped_condition(CC:condition_code,Swapped:condition_code)
+
+swapped_condition("A","B").
+swapped_condition("B","A").
+swapped_condition("AE","BE").
+swapped_condition("BE","AE").
+swapped_condition("G","L").
+swapped_condition("L","G").
+swapped_condition("GE","LE").
+swapped_condition("LE","GE").
+
+// Ordered single-instruction comparisons with one register defined as an
+// immediate in the same block.  `Reg CC K` limits Reg by CC; `K CC Reg` is
+// `Reg CC' K` for the swapped condition, e.g. `K < x` gives x >= K+1 on the
+// branch and x <= K on the fallthrough.
+value_reg_limit(EA,EA_branch,Reg,BranchValue,BranchLT),
+value_reg_limit(EA,EA_fallthrough,Reg,FallthroughValue,FallthroughLT):-
+    ordered_compare_and_jump_register(EA,CC,Lhs,Rhs),
+    (
+        ConstReg=Rhs,
+        Reg=Lhs,
+        EffectiveCC=CC
+        ;
+        ConstReg=Lhs,
+        Reg=Rhs,
+        swapped_condition(CC,EffectiveCC)
+    ),
+    limit_type_map(EffectiveCC,BranchLT,FallthroughLT,BranchOffset,FallthroughOffset),
+    reg_def_use.block_last_def(EA,EA_regdef,ConstReg),
+    arch.move_reg_imm(EA_regdef,ConstReg,Immediate,_),
+    track_register(Reg),
+    direct_jump(EA,EA_branch),
+    may_fallthrough(EA,EA_fallthrough),
+    BranchValue = Immediate + BranchOffset,
+    FallthroughValue = Immediate + FallthroughOffset.
+
 // Detect comparisons where one register is defined as an immediate in the same block.
+// (Ordered compare-and-branch instructions use the rule above instead.)
 value_reg_limit(EA_jmp,EA_branch,Reg,BranchValue,BranchLT),
 value_reg_limit(EA_jmp,EA_fallthrough,Reg,FallthroughValue,FallthroughLT):-
     compare_and_jump_register(EA_cmp,EA_jmp,CC,Reg1,Reg2),
+    !ordered_compare_and_jump_register(EA_jmp,_,_,_),
     limit_type_map(CC,LT1,LT2,Offset1,Offset2),
     (
         ConstReg=Reg1,
