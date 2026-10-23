@@ -835,12 +835,102 @@ boundary_sym_expr(EALo,Dest,Reason):-
     riscv_address_materialization_pair(EAHi,EALo,Dest),
     boundary_sym_expr(EAHi,Dest,Reason).
 
+// Final-emission coherence only. Structural split/control/CFG facts above
+// remain untouched: no old DU relation becomes a completeness input to the
+// outside proof. Exact pairs owned by that proof, genuinely shared raw-upper
+// uses, and foreign ownership of one lower all stay numeric as a group.
+.decl riscv_outside_legacy_pair(Hi:address,Lo:address)
+riscv_outside_legacy_pair(Hi,Lo):- riscv_split_load(Hi,Lo,_,_).
+riscv_outside_legacy_pair(Hi,Lo):- riscv_pcrel_control_transfer(Hi,Lo,_,_).
+.decl riscv_outside_legacy_pair_blocked(Hi:address,Lo:address)
+.output riscv_outside_legacy_pair_blocked
+// A physical upper value may survive a direct tail into a different FDE.
+// Bind the existing near-frontier walk first and veto only live raw values;
+// the mere presence of an unrelated uncertified jump in the HI's FDE does
+// not block a legacy group whose original register is already physically dead.
+.decl riscv_outside_uncertain_legacy_upper(Hi:address)
+.decl riscv_outside_legacy_raw_hi_escape(Hi:address,EA:address,Reason:symbol)
+.output riscv_outside_legacy_raw_hi_escape
+riscv_outside_legacy_raw_hi_escape(Hi,EA,"raw HI reaches uncertified jump"):-
+    riscv_outside_near_upper(Hi,Reg,_), riscv_outside_upper_walk(Hi,EA,Reg),
+    riscv_outside_uncertified_jump(EA).
+
+// Exempt only a legacy split-load lower whose normal emission has an
+// unambiguous HI, both encoded immediate/displacement extents, and a target
+// inside an ordinary loaded section. This is not a new binary-range guess.
+// A real-syntax MV is ADDI rd,rs,0, so no zero-immediate ADDI is exempted,
+// even if the legacy split-load relation happened to recognise its page base.
+// The exception never relies on symbolic_expr itself (the emission veto below
+// depends on this relation), and does not exempt an outside-proof pair.
+.decl riscv_outside_legacy_zero_addi(Lo:address)
+riscv_outside_legacy_zero_addi(Lo):-
+    riscv_split_load(_,Lo,_,_),
+    instruction_get_operation(Lo,"ADDI"),
+    arch.reg_arithmetic_operation(Lo,_,_,1,0).
+// Real syntax also spells SEXT.W as ADDIW rd,rs,0. The legacy arithmetic
+// relation recognises ADDIW, but sign extension is not a certified raw-HI
+// lower use. Exclude it without adding any new lower-recognition rule.
+.decl riscv_outside_legacy_zero_addiw(Lo:address)
+riscv_outside_legacy_zero_addiw(Lo):-
+    riscv_split_load(_,Lo,_,_),
+    instruction_get_operation(Lo,"ADDIW"),
+    arch.reg_arithmetic_operation(Lo,_,_,1,0).
+.decl riscv_outside_legacy_lower_exempt(Hi:address,Lo:address)
+riscv_outside_legacy_lower_exempt(Hi,Lo):-
+    riscv_split_load(Hi,Lo,Index,Target),
+    riscv_outside_near_upper(Hi,Reg,_), riscv_outside_upper_walk(Hi,Lo,Reg),
+    !riscv_ambiguous_split_hi(Hi), !riscv_outside_legacy_zero_addi(Lo),
+    !riscv_outside_legacy_zero_addiw(Lo),
+    !riscv_outside_section_candidate(Hi,Lo,_,_,_),
+    instruction_immediate_offset(Hi,1,_,_),
+    (instruction_immediate_offset(Lo,Index,_,_);
+     instruction_displacement_offset(Lo,Index,_,_)),
+    loaded_section(Beg,End,Name), Beg <= Target, Target < End,
+    !section_property(Name,"ThreadLocal").
+
+// Refuse an unproved raw-value copy/escape at the original-register use,
+// before a physical kill can hide a copied alias or stack reload in another
+// FDE. No alias, stack-value or callee-behaviour inference is added here.
+riscv_outside_legacy_raw_hi_escape(Hi,EA,"unsymbolized raw HI explicit use"):-
+    riscv_outside_near_upper(Hi,Reg,_), riscv_outside_upper_walk(Hi,EA,Reg),
+    basic_reg_def_use.used(EA,Reg,_),
+    !riscv_outside_legacy_lower_exempt(Hi,EA).
+riscv_outside_legacy_raw_hi_escape(Hi,EA,"raw HI stored"):-
+    riscv_outside_near_upper(Hi,Reg,_), riscv_outside_upper_walk(Hi,EA,Reg),
+    arch.memory_access("STORE",EA,_,_,Reg,_,_,_,_).
+// Argument and result registers are implicit call/return operands. They
+// must be vetoed even if the decoded instruction has no explicit source read.
+riscv_outside_legacy_raw_hi_escape(Hi,EA,"raw HI passed as call argument"):-
+    riscv_outside_near_upper(Hi,Reg,_), riscv_outside_upper_walk(Hi,EA,Reg),
+    arch.call(EA,_), arch.lra_argument_register(Reg).
+riscv_outside_legacy_raw_hi_escape(Hi,EA,"raw HI returned to caller"):-
+    riscv_outside_near_upper(Hi,Reg,_), riscv_outside_upper_walk(Hi,EA,Reg),
+    arch.return(EA), arch.lra_return_register(Reg).
+riscv_outside_uncertain_legacy_upper(Hi):-
+    riscv_outside_legacy_raw_hi_escape(Hi,_,_).
+riscv_outside_legacy_pair_blocked(Hi,Lo):-
+    riscv_outside_uncertain_legacy_upper(Hi), riscv_outside_legacy_pair(Hi,Lo).
+riscv_outside_legacy_pair_blocked(Hi,Lo):-
+    riscv_outside_section_candidate(Hi,Lo,_,_,_).
+riscv_outside_legacy_pair_blocked(Hi,Lo):-
+    riscv_outside_section_candidate(Hi,OwnedLo,_,_,_),
+    riscv_outside_upper_walk(Hi,Lo,Reg),
+    basic_reg_def_use.used(Lo,Reg,_), Lo != OwnedLo.
+riscv_outside_legacy_pair_blocked(Hi,Lo):-
+    riscv_outside_section_candidate(OtherHi,Lo,_,_,_),
+    riscv_outside_legacy_pair(Hi,Lo), Hi != OtherHi.
+// One physical HI is one relocation group. A genuine operand conflict on
+// one member cannot leave another inferred member relocating that same HI.
+riscv_outside_legacy_pair_blocked(Hi,Lo):-
+    riscv_outside_legacy_pair_blocked(Hi,_), riscv_outside_legacy_pair(Hi,Lo).
+
 symbolic_expr(EAHi+InstrOffset,Size,Symbol,0):-
-    riscv_pcrel_plt_call(EAHi,_,Symbol),
+    riscv_pcrel_plt_call(EAHi,EALo,Symbol),
     instruction_immediate_offset(EAHi,1,InstrOffset,Size),
     !symbolic_expr_from_relocation(EAHi+InstrOffset,_,_,_,_),
     !symbol_minus_symbol_from_relocation(EAHi+InstrOffset,_,_,_,_,_),
-    !symbol_minus_symbol(EAHi+InstrOffset,_,_,_,_,_).
+    !symbol_minus_symbol(EAHi+InstrOffset,_,_,_,_,_),
+    !riscv_outside_legacy_pair_blocked(EAHi,EALo).
 
 symbolic_expr(EAHi+InstrOffset,Size,SymbolName,Offset),
 symbolic_expr_symbol_address(EAHi+InstrOffset,1,SymbolName,FinalDest):-
@@ -863,7 +953,8 @@ symbolic_expr_symbol_address(EAHi+InstrOffset,1,SymbolName,FinalDest):-
         ;
         !boundary_sym_expr(EAHi+InstrOffset,FinalDest,_), SymbolLoc = "Beg"
     ),
-    best_symexpr_symbol(FinalDest,SymbolName,SymbolLoc).
+    best_symexpr_symbol(FinalDest,SymbolName,SymbolLoc),
+    !riscv_outside_legacy_pair_blocked(EAHi,EALo).
 
 symbolic_expr(EALo+InstrOffset,Size,SymbolName,0),
 symbolic_expr_symbol_address(EALo+InstrOffset,1,SymbolName,EAHi):-
@@ -873,7 +964,8 @@ symbolic_expr_symbol_address(EALo+InstrOffset,1,SymbolName,EAHi):-
     !symbolic_expr_from_relocation(EALo+InstrOffset,_,_,_,_),
     !symbol_minus_symbol_from_relocation(EALo+InstrOffset,_,_,_,_,_),
     !symbol_minus_symbol(EALo+InstrOffset,_,_,_,_,_),
-    riscv_pcrel_anchor_symbol(EAHi,SymbolName).
+    riscv_pcrel_anchor_symbol(EAHi,SymbolName),
+    !riscv_outside_legacy_pair_blocked(EAHi,EALo).
 
 // One-register transfer aliases have an implicit zero low offset but no
 // immediate operand for instruction_immediate_offset. Attach the LO expression
@@ -888,24 +980,28 @@ symbolic_expr_symbol_address(EALo,1,SymbolName,EAHi):-
     !symbolic_expr_from_relocation(EALo,_,_,_,_),
     !symbol_minus_symbol_from_relocation(EALo,_,_,_,_,_),
     !symbol_minus_symbol(EALo,_,_,_,_,_),
-    riscv_pcrel_anchor_symbol(EAHi,SymbolName).
+    riscv_pcrel_anchor_symbol(EAHi,SymbolName),
+    !riscv_outside_legacy_pair_blocked(EAHi,EALo).
 
 symbolic_expr_attribute(EALo,"PCREL"):-
     riscv_pcrel_control_transfer(EAHi,EALo,1,_),
-    !riscv_pcrel_plt_call(EAHi,EALo,_).
+    !riscv_pcrel_plt_call(EAHi,EALo,_),
+    !riscv_outside_legacy_pair_blocked(EAHi,EALo).
 
 symbolic_expr_attribute(EALo,"LO"):-
     riscv_pcrel_control_transfer(EAHi,EALo,1,_),
-    !riscv_pcrel_plt_call(EAHi,EALo,_).
+    !riscv_pcrel_plt_call(EAHi,EALo,_),
+    !riscv_outside_legacy_pair_blocked(EAHi,EALo).
 
 symbolic_expr(EAHi+InstrOffset,Size,Symbol,Addend):-
-    riscv_split_load(EAHi,_,_,GotEntry),
+    riscv_split_load(EAHi,EALo,_,GotEntry),
     riscv_got_reference(GotEntry,Symbol,Addend),
     !riscv_ambiguous_split_hi(EAHi),
     instruction_immediate_offset(EAHi,1,InstrOffset,Size),
     !symbolic_expr_from_relocation(EAHi+InstrOffset,_,_,_,_),
     !symbol_minus_symbol_from_relocation(EAHi+InstrOffset,_,_,_,_,_),
-    !symbol_minus_symbol(EAHi+InstrOffset,_,_,_,_,_).
+    !symbol_minus_symbol(EAHi+InstrOffset,_,_,_,_,_),
+    !riscv_outside_legacy_pair_blocked(EAHi,EALo).
 
 labeled_ea(Target):-
     riscv_split_load(EAHi,_,_,GotEntry),
@@ -914,20 +1010,22 @@ labeled_ea(Target):-
 
 symbolic_expr(EAHi+InstrOffset,Size,Symbol,0),
 symbolic_expr_symbol_address(EAHi+InstrOffset,1,Symbol,Target):-
-    riscv_split_load(EAHi,_,_,GotEntry),
+    riscv_split_load(EAHi,EALo,_,GotEntry),
     riscv_local_got_reference(GotEntry,Target),
     !riscv_ambiguous_split_hi(EAHi),
     instruction_immediate_offset(EAHi,1,InstrOffset,Size),
     !symbolic_expr_from_relocation(EAHi+InstrOffset,_,_,_,_),
     !symbol_minus_symbol_from_relocation(EAHi+InstrOffset,_,_,_,_,_),
     !symbol_minus_symbol(EAHi+InstrOffset,_,_,_,_,_),
-    best_symexpr_symbol(Target,Symbol,"Beg").
+    best_symexpr_symbol(Target,Symbol,"Beg"),
+    !riscv_outside_legacy_pair_blocked(EAHi,EALo).
 
 symbolic_expr(EAHi+InstrOffset,Size,SymbolName,Offset),
 symbolic_expr_symbol_address(EAHi+InstrOffset,1,SymbolName,FinalDest):-
-    riscv_split_load(EAHi,_,_,Dest),
+    riscv_split_load(EAHi,EALo,_,Dest),
     !riscv_ambiguous_split_hi(EAHi),
-    !riscv_split_load_got(EAHi,_,_),
+    !riscv_split_load_got(EAHi,EALo,_),
+    !riscv_outside_section_candidate(EAHi,EALo,_,_,_),
     instruction_immediate_offset(EAHi,1,InstrOffset,Size),
     !symbolic_expr_from_relocation(EAHi+InstrOffset,_,_,_,_),
     !symbol_minus_symbol_from_relocation(EAHi+InstrOffset,_,_,_,_,_),
@@ -950,7 +1048,8 @@ symbolic_expr_symbol_address(EAHi+InstrOffset,1,SymbolName,FinalDest):-
         !riscv_split_load_section_end(EAHi,_,FinalDest),
         SymbolLoc = "Beg"
     ),
-    best_symexpr_symbol(FinalDest,SymbolName,SymbolLoc).
+    best_symexpr_symbol(FinalDest,SymbolName,SymbolLoc),
+    !riscv_outside_legacy_pair_blocked(EAHi,EALo).
 
 symbolic_expr(EAHi+InstrOffset,Size,SymbolName,Offset),
 symbolic_expr_symbol_address(EAHi+InstrOffset,1,SymbolName,FinalDest):-
@@ -978,6 +1077,7 @@ symbolic_expr(EALo+InstrOffset,Size,SymbolName,0),
 symbolic_expr_symbol_address(EALo+InstrOffset,1,SymbolName,EAHi):-
     riscv_split_load(EAHi,EALo,IndexLo,_),
     !riscv_ambiguous_split_hi(EAHi),
+    !riscv_outside_section_candidate(EAHi,EALo,_,_,_),
     (
         instruction_immediate_offset(EALo,IndexLo,InstrOffset,Size);
         instruction_displacement_offset(EALo,IndexLo,InstrOffset,Size)
@@ -985,7 +1085,8 @@ symbolic_expr_symbol_address(EALo+InstrOffset,1,SymbolName,EAHi):-
     !symbolic_expr_from_relocation(EALo+InstrOffset,_,_,_,_),
     !symbol_minus_symbol_from_relocation(EALo+InstrOffset,_,_,_,_,_),
     !symbol_minus_symbol(EALo+InstrOffset,_,_,_,_,_),
-    riscv_pcrel_anchor_symbol(EAHi,SymbolName).
+    riscv_pcrel_anchor_symbol(EAHi,SymbolName),
+    !riscv_outside_legacy_pair_blocked(EAHi,EALo).
 
 symbolic_expr(EALo,4,SymbolName,0),
 symbolic_expr_symbol_address(EALo,1,SymbolName,EAHi):-
@@ -994,13 +1095,16 @@ symbolic_expr_symbol_address(EALo,1,SymbolName,EAHi):-
     !symbolic_expr_from_relocation(EALo,_,_,_,_),
     !symbol_minus_symbol_from_relocation(EALo,_,_,_,_,_),
     !symbol_minus_symbol(EALo,_,_,_,_,_),
-    riscv_pcrel_anchor_symbol(EAHi,SymbolName).
+    riscv_pcrel_anchor_symbol(EAHi,SymbolName),
+    !riscv_outside_legacy_pair_blocked(EAHi,EALo).
 
 symbolic_expr_attribute(EALo,"PCREL"):-
-    riscv_split_load_zero_addi_alias(_,EALo,_).
+    riscv_split_load_zero_addi_alias(EAHi,EALo,_),
+    !riscv_outside_legacy_pair_blocked(EAHi,EALo).
 
 symbolic_expr_attribute(EALo,"LO"):-
-    riscv_split_load_zero_addi_alias(_,EALo,_).
+    riscv_split_load_zero_addi_alias(EAHi,EALo,_),
+    !riscv_outside_legacy_pair_blocked(EAHi,EALo).
 
 symbolic_expr(EALo,4,SymbolName,0),
 symbolic_expr_symbol_address(EALo,1,SymbolName,Dest):-
@@ -1050,29 +1154,35 @@ symbolic_expr_symbol_address(EA+InstrOffset,2,SymbolName,Dest):-
     best_symexpr_symbol(Dest,SymbolName,"Beg").
 
 symbolic_operand_attribute(EAHi,1,"GOT"):-
-    riscv_split_load_got(EAHi,_,_).
+    riscv_split_load_got(EAHi,EALo,_),
+    !riscv_outside_legacy_pair_blocked(EAHi,EALo).
 
 symbolic_operand_attribute(EAHi,1,"PLT"):-
-    riscv_pcrel_plt_call(EAHi,_,_).
+    riscv_pcrel_plt_call(EAHi,EALo,_),
+    !riscv_outside_legacy_pair_blocked(EAHi,EALo).
 
 symbolic_operand_attribute(EAHi,1,"PCREL"),
 symbolic_operand_attribute(EAHi,1,"HI"):-
     riscv_pcrel_control_transfer(EAHi,EALo,_,_),
-    !riscv_pcrel_plt_call(EAHi,EALo,_).
+    !riscv_pcrel_plt_call(EAHi,EALo,_),
+    !riscv_outside_legacy_pair_blocked(EAHi,EALo).
 
 symbolic_operand_attribute(EALo,IndexLo,"PCREL"),
 symbolic_operand_attribute(EALo,IndexLo,"LO"):-
     riscv_pcrel_control_transfer(EAHi,EALo,IndexLo,_),
-    !riscv_pcrel_plt_call(EAHi,EALo,_).
+    !riscv_pcrel_plt_call(EAHi,EALo,_),
+    !riscv_outside_legacy_pair_blocked(EAHi,EALo).
 
 symbolic_operand_attribute(EAHi,1,"PCREL"),
 symbolic_operand_attribute(EAHi,1,"HI"):-
-    riscv_split_load(EAHi,_,_,_),
-    !riscv_split_load_got(EAHi,_,_).
+    riscv_split_load(EAHi,EALo,_,_),
+    !riscv_split_load_got(EAHi,EALo,_),
+    !riscv_outside_legacy_pair_blocked(EAHi,EALo).
 
 symbolic_operand_attribute(EALo,IndexLo,"PCREL"),
 symbolic_operand_attribute(EALo,IndexLo,"LO"):-
-    riscv_split_load(_,EALo,IndexLo,_).
+    riscv_split_load(EAHi,EALo,IndexLo,_),
+    !riscv_outside_legacy_pair_blocked(EAHi,EALo).
 
 symbolic_operand_attribute(EAHi,1,"HI"):-
     riscv_symbolic_absolute_split_load(EAHi,_,_,_).
@@ -1424,3 +1534,6 @@ symbolic_expr_from_relocation(EA,Size,"",Addend,Dest):-
     ambiguous_symbol(Symbol),
     symbol(SymAddr,_,_,_,_,_,_,SymbolIndex,Symbol),
     Dest = as(as(SymAddr,number)+Addend,address).
+
+// Outside-section biased bases require a complete, independent use proof.
+#include "riscv_outside_section.dl"

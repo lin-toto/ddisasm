@@ -1,0 +1,724 @@
+//===- riscv_outside_jump_table.dl -------------------------*- datalog -*-===//
+//
+// Copyright (C) 2026 GrammaTech, Inc.
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// Early binary-only completeness for a deliberately narrow relative switch:
+//   BLTU bound,index,default; AUIPC; ADDI; SLLI 2; ADD; LW; ADD; JR
+// The unsigned fallthrough index is in [0,bound]. All entries are signed32
+// offsets from the completed AUIPC/ADDI base. No regular symbol table, debug
+// information, retained jump-table row, refined CFG or outside certificate is
+// a proof input. Runtime .eh_frame FDE ranges delimit the function region.
+//
+// STAGING: the parent supplies riscv_outside_early_expected_next/early_next,
+// an E0 instruction graph containing decoded immediate branches, ordinary
+// sequential continuations and runtime LSDA edges. Only the parent's proven
+// dynamic exit-PLT calls omit their continuation; that same predicate marks
+// them as terminating path ends, never as a missing/unknown continuation.
+// It must not contain this file's exported targets or use full outside_next.
+// Only riscv_outside_table_target is added to the parent's later full graph.
+//
+// A direct-only graph cannot waive incoming indirect alternatives. Every
+// non-return register jump in a demanded FDE must match this independently
+// proven shape. E0 syntax produces provisional raw envelopes before proof.
+// E1 adds every provisional alternative, preserving their incoming state.
+// All shapes in a region are validated together; one missing
+// guard/entry/definition or unmatched jump refuses the entire group. This is
+// a closed guarded-corridor invariant: no external/direct/LSDA root may enter
+// a corridor after its guard, and no provisional table target may enter any
+// such corridor. There is no feedback from accepted tables to this proof.
+// An unsupported or incomplete dispatch keeps its whole region refused.
+// E1 is conditionally complete only if every region obligation succeeds;
+// no accepted certificate, outside RD or final output is an E0/E1 input.
+
+.decl riscv_outside_table_target(Jump:address,Target:address)
+.output riscv_outside_table_target
+.decl riscv_outside_table_certificate(Jump:address,Guard:address,Bound:number,
+                                      Table:address,Beg:address,End:address)
+.output riscv_outside_table_certificate
+.decl riscv_outside_table_refusal(Jump:address,At:address,Reason:symbol)
+.output riscv_outside_table_refusal
+
+// Candidate-driven region demand precedes every table query and output. A
+// missing or overlapping runtime FDE is not repaired with symbol extents.
+.decl riscv_outside_table_region(Beg:address,End:address)
+riscv_outside_table_region(Beg,End):-
+    riscv_outside_near_upper(Hi,_,_), fde_addresses(Beg,End),
+    Beg <= Hi, Hi < End, Beg > 0, End > Beg,
+    End < 0x7fffffff00000000, code(Beg),
+    loaded_section(SecBeg,SecEnd,Name),
+    section_property(Name,"Executable"),
+    !section_property(Name,"ThreadLocal"),
+    SecBeg <= Beg, End <= SecEnd.
+
+.decl riscv_outside_table_node(Beg:address,End:address,EA:address)
+riscv_outside_table_node(Beg,End,EA):-
+    riscv_outside_table_region(Beg,End), code(EA),
+    instruction(EA,Size,_,_,_,_,_,_,_,_), (Size = 2; Size = 4),
+    // JR/JALR clears bit zero. Reject odd decoder starts rather than rounding
+    // a raw table target into an address for which this proof has no node.
+    Beg <= EA, EA < End, EA+Size <= End, EA % 2 = 0.
+
+.decl riscv_outside_table_e0(Beg:address,End:address,
+                           EA:address,Next:address)
+riscv_outside_table_e0(Beg,End,EA,Next):-
+    riscv_outside_table_node(Beg,End,EA),
+    riscv_outside_early_next(EA,Next),
+    riscv_outside_table_node(Beg,End,Next).
+
+.decl riscv_outside_table_immediate_call(EA:address,Target:address)
+riscv_outside_table_immediate_call(EA,Target):-
+    arch.call(EA,Index), instruction_get_op(EA,Index,Op),
+    op_immediate(Op,Imm,_), Target = as(Imm,address), code(EA).
+
+.decl riscv_outside_table_immediate_jump(EA:address,Target:address)
+riscv_outside_table_immediate_jump(EA,Target):-
+    arch.jump(EA), instruction_get_operation(EA,Operation),
+    arch.jump_operation_op_index(Operation,Index),
+    instruction_get_op(EA,Index,Op), op_immediate(Op,Imm,_),
+    Target = as(Imm,address), code(EA).
+
+.decl riscv_outside_table_register_jump(Beg:address,End:address,EA:address)
+riscv_outside_table_register_jump(Beg,End,EA):-
+    riscv_outside_table_node(Beg,End,EA), arch.jump(EA),
+    !riscv_outside_table_immediate_jump(EA,_).
+
+// Recognize exact 64-bit operations. ADDW/SLLIW/LWU and nonzero JALR
+// displacements are not substitutes for the signed32 dispatch semantics.
+.decl riscv_outside_table_add(EA:address,Dst:register,
+                            Src1:register,Src2:register)
+riscv_outside_table_add(EA,Dst,Src1,Src2):-
+    instruction_get_operation(EA,Operation),
+    (Operation = "ADD"; Operation = "C.ADD"),
+    arch.reg_reg_arithmetic_operation(EA,Dst,Src1,Src2,1,0).
+
+.decl riscv_outside_table_jr(EA:address,Reg:register)
+riscv_outside_table_jr(EA,Reg):-
+    instruction_get_operation(EA,"C.JR"),
+    instruction_get_op(EA,1,Op), op_regdirect_contains_reg(Op,Reg),
+    arch.jump(EA), Reg != "ZERO", Reg != "RA".
+riscv_outside_table_jr(EA,Reg):-
+    instruction(EA,_,_,"JALR",Base,Off,Dst,0,_,_),
+    op_regdirect_contains_reg(Base,Reg), op_immediate(Off,0,_),
+    op_regdirect_contains_reg(Dst,"ZERO"), arch.jump(EA),
+    Reg != "ZERO", Reg != "RA".
+
+.decl riscv_outside_table_shape(Beg:address,End:address,Jump:address,
+    Guard:address,BoundReg:register,IndexReg:register,
+    Hi:address,Lo:address,Upper:register,BaseReg:register,Table:address,
+    Shift:address,Addr:address,Load:address,Add:address,Work:register)
+riscv_outside_table_shape(Beg,End,Jump,Guard,BoundReg,IndexReg,
+                          Hi,Lo,Upper,BaseReg,Table,Shift,Addr,Load,Add,Work):-
+    riscv_outside_table_register_jump(Beg,End,Jump),
+    riscv_outside_table_jr(Jump,Work),
+    next(Add,Jump), next(Load,Add), next(Addr,Load),
+    next(Shift,Addr), next(Lo,Shift), next(Hi,Lo), next(Guard,Hi),
+    riscv_outside_table_node(Beg,End,Guard),
+    // RiscVLoader rotates the first printed operand last: (rs2,target,rs1).
+    instruction(Guard,_,_,"BLTU",IndexOp,TargetOp,BoundOp,0,_,_),
+    op_regdirect_contains_reg(BoundOp,BoundReg),
+    op_regdirect_contains_reg(IndexOp,IndexReg),
+    op_immediate(TargetOp,_,_),
+    riscv_auipc(Hi,Upper,UpperValue),
+    instruction_get_operation(Lo,"ADDI"),
+    arch.reg_arithmetic_operation(Lo,BaseReg,Upper,1,Low),
+    Low >= -2048, Low <= 2047,
+    Hi < 0x7fffffff00000000, UpperValue < 0x7ffffffffff00000,
+    as(UpperValue,number)+Low > 0,
+    Table = as(as(UpperValue,number)+Low,address),
+    Table < 0x7fffffff00000000,
+    instruction_get_operation(Shift,ShiftOp),
+    (ShiftOp = "SLLI"; ShiftOp = "C.SLLI"),
+    arch.reg_arithmetic_operation(Shift,Work,IndexReg,4,0),
+    riscv_outside_table_add(Addr,Work,Work,BaseReg),
+    instruction_get_operation(Load,LoadOp),
+    (LoadOp = "LW"; LoadOp = "C.LW"),
+    arch.memory_access("LOAD",Load,_,_,Work,Work,"NONE",_,0),
+    riscv_outside_table_add(Add,Work,Work,BaseReg),
+    Upper != IndexReg, Upper != Work, BaseReg != IndexReg,
+    BaseReg != Work, BoundReg != IndexReg,
+    BaseReg != "SP", BaseReg != "GP", BaseReg != "TP",
+    BaseReg != "ZERO", Upper != "ZERO", Work != "ZERO".
+
+// Two-level suffix: the guard checks a signed LW; a same-address LWU is the
+// sole definition consumed by the shift. The guarded word is NEVER read from
+// ELF bytes. Equality uses the explicit race-free single-thread memory model
+// GCC uses, and the complete no-write/no-call/no-system path proof below.
+// Writable flags, section names and GNU RELRO are not immutability premises.
+.decl riscv_outside_table_two_suffix(Beg:address,End:address,Jump:address,
+    Guard:address,GuardReg:register,BoundReg:register,Reload:address,
+    Hi:address,Lo:address,Upper:register,BaseReg:register,Table:address,
+    Shift:address,Addr:address,Load:address,Add:address,Work:register)
+riscv_outside_table_two_suffix(Beg,End,Jump,Guard,G,BoundReg,Reload,
+                              Hi,Lo,Upper,BaseReg,Table,Shift,Addr,Load,Add,Work):-
+    riscv_outside_table_register_jump(Beg,End,Jump),
+    riscv_outside_table_jr(Jump,Work),
+    next(Add,Jump), next(Load,Add), next(Addr,Load), next(Shift,Addr),
+    next(Lo,Shift), next(Hi,Lo), next(Reload,Hi), next(Guard,Reload),
+    riscv_outside_table_node(Beg,End,Guard),
+    instruction(Guard,_,_,"BLTU",IndexOp,TargetOp,BoundOp,0,_,_),
+    op_regdirect_contains_reg(IndexOp,G),
+    op_regdirect_contains_reg(BoundOp,BoundReg), op_immediate(TargetOp,_,_),
+    instruction_get_operation(Reload,"LWU"),
+    riscv_auipc(Hi,Upper,UpperValue), instruction_get_operation(Lo,"ADDI"),
+    arch.reg_arithmetic_operation(Lo,BaseReg,Upper,1,Low),
+    Low >= -2048, Low <= 2047, UpperValue < 0x7ffffffffff00000,
+    Hi < 0x7fffffff00000000, as(UpperValue,number)+Low > 0,
+    Table = as(as(UpperValue,number)+Low,address),
+    Table < 0x7fffffff00000000,
+    instruction_get_operation(Shift,ShiftOp),
+    (ShiftOp = "SLLI"; ShiftOp = "C.SLLI"),
+    arch.reg_arithmetic_operation(Shift,Work,Work,4,0),
+    riscv_outside_table_add(Addr,Work,Work,BaseReg),
+    instruction_get_operation(Load,LoadOp), (LoadOp = "LW"; LoadOp = "C.LW"),
+    arch.memory_access("LOAD",Load,_,_,Work,Work,"NONE",_,0),
+    riscv_outside_table_add(Add,Work,Work,BaseReg),
+    G != Work, G != BoundReg, Upper != G, Upper != Work,
+    BaseReg != G, BaseReg != Work,
+    BaseReg != "SP", BaseReg != "GP", BaseReg != "TP",
+    BaseReg != "ZERO", Upper != "ZERO", Work != "ZERO".
+
+.decl riscv_outside_table_two_prefix(Beg:address,End:address,Jump:address,
+    Guard:address,GuardReg:register,BoundReg:register,ZextHi:address,ZextLo:address,
+    Index:register,MapHi:address,MapLo:address,MapBaseReg:register,MapBase:address,
+    Scale:address,MapAddr:address,MapLoad:address,Offset:number,Stride:number,
+    Reload:address,Work:register)
+riscv_outside_table_two_prefix(Beg,End,Jump,Guard,G,BoundReg,Z1,Z2,Index,
+                              MapHi,MapLo,MapReg,MapBase,Scale,MapAddr,
+                              MapLoad,Offset,Stride,Reload,Work):-
+    riscv_outside_table_two_suffix(Beg,End,Jump,Guard,G,BoundReg,Reload,
+                                  _,_,_,_,_,_,_,_,_,Work),
+    next(MapLoad,Const), next(Const,Guard), next(MapAddr,MapLoad),
+    next(Scale,MapAddr), next(MapLo,Scale), next(MapHi,MapLo),
+    next(Z2,MapHi), next(Z1,Z2),
+    instruction_get_operation(Z1,"C.SLLI"),
+    arch.reg_arithmetic_operation(Z1,Index,Index,4294967296,0),
+    instruction(Z2,_,_,"C.SRLI",ZImm,ZReg,0,0,_,_),
+    op_immediate(ZImm,32,_), op_regdirect_contains_reg(ZReg,Index),
+    riscv_auipc(MapHi,MapReg,Upper), instruction_get_operation(MapLo,"ADDI"),
+    arch.reg_arithmetic_operation(MapLo,MapReg,MapReg,1,Low),
+    Low >= -2048, Low <= 2047, Upper < 0x7ffffffffff00000,
+    as(Upper,number)+Low > 0,
+    MapBase = as(as(Upper,number)+Low,address), MapBase < 0x7fffffff00000000,
+    instruction_get_operation(Scale,"SLLI"),
+    arch.reg_arithmetic_operation(Scale,Work,Index,Stride,0),
+    Stride >= 4, Stride <= 4096,
+    riscv_outside_table_add(MapAddr,Work,Work,MapReg),
+    instruction_get_operation(MapLoad,"LW"),
+    arch.memory_access("LOAD",MapLoad,_,_,G,Work,"NONE",_,Offset),
+    arch.memory_access("LOAD",Reload,_,_,Work,Work,"NONE",_,Offset),
+    instruction_get_op(MapLoad,_,MapMem), op_indirect(MapMem,_,_,_,_,Offset,4),
+    instruction_get_op(Reload,_,ReloadMem), op_indirect(ReloadMem,_,_,_,_,Offset,4),
+    Offset >= -2048, Offset <= 2047,
+    MapReg != Index, MapReg != Work, MapReg != G, MapReg != BoundReg,
+    Index != Work, Index != G, Index != BoundReg,
+    MapReg != "SP", MapReg != "GP", MapReg != "TP", MapReg != "ZERO".
+
+// Normalized final-table obligations are shared. The additional same-load
+// and reload-window obligations below are mandatory before export. The first
+// map index is not bounded or read from ELF: it supplies the runtime guarded
+// word only, and its geometry adds no final dispatch soundness premise.
+riscv_outside_table_shape(Beg,End,Jump,Guard,BoundReg,G,
+                         Hi,Lo,Upper,BaseReg,Table,Shift,Addr,Load,Add,Work):-
+    riscv_outside_table_two_prefix(Beg,End,Jump,Guard,G,BoundReg,
+                                  _,_,_,_,_,_,_,_,_,_,_,_,_,Work),
+    riscv_outside_table_two_suffix(Beg,End,Jump,Guard,G,BoundReg,_,
+                                  Hi,Lo,Upper,BaseReg,Table,Shift,Addr,Load,Add,Work).
+
+.decl riscv_outside_table_corridor(Jump:address,Guard:address,EA:address)
+riscv_outside_table_corridor(Jump,Guard,EA):-
+    riscv_outside_table_shape(Beg,End,Jump,Guard,_,_,
+                             Hi,_,_,_,_,_,_,_,_,_),
+    riscv_outside_table_node(Beg,End,EA), Hi <= EA, EA <= Jump.
+riscv_outside_table_corridor(Jump,Guard,EA):-
+    riscv_outside_table_two_suffix(Beg,End,Jump,Guard,_,_,Reload,
+                                  _,_,_,_,_,_,_,_,_,_),
+    riscv_outside_table_node(Beg,End,EA), Reload <= EA, EA <= Jump.
+
+.decl riscv_outside_table_const_def(EA:address,Reg:register,Value:number)
+riscv_outside_table_const_def(EA,Reg,Value):-
+    riscv_outside_table_node(_,_,EA),
+    instruction_get_operation(EA,Operation),
+    (Operation = "LI"; Operation = "C.LI"; Operation = "ADDI"),
+    arch.move_reg_imm(EA,Reg,Value,_),
+    Value >= 0, Value <= 4095, code(EA),
+    !relocation(EA,_,_,_,_,_,_).
+
+// Physical definitions plus all ABI caller-saved call definitions. Unknown
+// roots are retained as Def=0; address zero is never a constant definition.
+.decl riscv_outside_table_kill(EA:address,Reg:register)
+riscv_outside_table_kill(EA,Reg):-
+    riscv_outside_table_node(_,_,EA),
+    (
+        register_access(EA,RegIn,"W"), reg_map(RegIn,Reg),
+        !arch.register_access_override(EA,Reg,"W",0)
+        ;
+        arch.register_access_override(EA,Reg,"W",1)
+    ),
+    track_register(Reg), !arch.conditional(EA,_).
+riscv_outside_table_kill(EA,Reg):-
+    riscv_outside_table_node(_,_,EA), arch.call(EA,_), arch.lra_caller_saved(Reg).
+riscv_outside_table_kill(EA,"A0"):-
+    riscv_outside_table_node(_,_,EA), instruction_get_operation(EA,"ECALL").
+
+.decl riscv_outside_table_use_requirement(Jump:address,EA:address,
+                                        Reg:register,Def:address)
+riscv_outside_table_use_requirement(Jump,Lo,Upper,Hi),
+riscv_outside_table_use_requirement(Jump,Addr,BaseReg,Lo),
+riscv_outside_table_use_requirement(Jump,Add,BaseReg,Lo),
+riscv_outside_table_use_requirement(Jump,Addr,Work,Shift),
+riscv_outside_table_use_requirement(Jump,Load,Work,Addr),
+riscv_outside_table_use_requirement(Jump,Add,Work,Load),
+riscv_outside_table_use_requirement(Jump,Jump,Work,Add):-
+    riscv_outside_table_shape(_,_,Jump,_,_,_,Hi,Lo,Upper,BaseReg,_,
+                             Shift,Addr,Load,Add,Work).
+riscv_outside_table_use_requirement(Jump,MapLo,MapReg,MapHi),
+riscv_outside_table_use_requirement(Jump,MapAddr,MapReg,MapLo),
+riscv_outside_table_use_requirement(Jump,MapAddr,Work,Scale),
+riscv_outside_table_use_requirement(Jump,Scale,Index,Z2),
+riscv_outside_table_use_requirement(Jump,MapLoad,Work,MapAddr),
+riscv_outside_table_use_requirement(Jump,Reload,Work,MapAddr),
+riscv_outside_table_use_requirement(Jump,Guard,G,MapLoad):-
+    riscv_outside_table_two_prefix(_,_,Jump,Guard,G,_,_,Z2,Index,
+                                  MapHi,MapLo,MapReg,_,Scale,MapAddr,
+                                  MapLoad,_,_,Reload,Work).
+riscv_outside_table_use_requirement(Jump,Shift,Work,Reload):-
+    riscv_outside_table_two_suffix(_,_,Jump,_,_,_,Reload,
+                                  _,_,_,_,_,Shift,_,_,_,Work).
+
+.decl riscv_outside_table_query(Beg:address,End:address,
+                              EA:address,Reg:register)
+riscv_outside_table_query(Beg,End,EA,Reg):-
+    riscv_outside_table_shape(Beg,End,Jump,_,_,_,_,_,_,_,_,_,_,_,_,_),
+    riscv_outside_table_use_requirement(Jump,EA,Reg,_).
+riscv_outside_table_query(Beg,End,Guard,BoundReg),
+riscv_outside_table_query(Beg,End,Guard,IndexReg),
+riscv_outside_table_query(Beg,End,Shift,IndexReg):-
+    riscv_outside_table_shape(Beg,End,_,Guard,BoundReg,IndexReg,
+                             _,_,_,_,_,Shift,_,_,_,_).
+riscv_outside_table_query(Beg,End,Prev,Reg):-
+    riscv_outside_table_query(Beg,End,EA,Reg),
+    riscv_outside_table_e0(Beg,End,Prev,EA),
+    !riscv_outside_table_kill(Prev,Reg).
+
+// Provisional bounds are only positive, syntactic possibilities. An unknown
+// alternative or conflicting value is rejected by the complete RD below.
+// Raw envelopes precede roots and RD, so they cannot rely on their own proof.
+.decl riscv_outside_table_const_walk(Beg:address,End:address,
+    Def:address,Reg:register,Value:number,EA:address)
+riscv_outside_table_const_walk(Beg,End,Def,Reg,Value,Next):-
+    riscv_outside_table_query(Beg,End,Next,Reg),
+    riscv_outside_table_e0(Beg,End,Def,Next),
+    riscv_outside_table_const_def(Def,Reg,Value).
+riscv_outside_table_const_walk(Beg,End,Def,Reg,Value,Next):-
+    riscv_outside_table_const_walk(Beg,End,Def,Reg,Value,EA),
+    riscv_outside_table_e0(Beg,End,EA,Next),
+    riscv_outside_table_query(Beg,End,Next,Reg),
+    !riscv_outside_table_kill(EA,Reg).
+
+.decl riscv_outside_table_envelope(Beg:address,End:address,Jump:address,
+                                  Guard:address,Bound:number,Table:address)
+riscv_outside_table_envelope(Beg,End,Jump,Guard,Bound,Table):-
+    riscv_outside_table_shape(Beg,End,Jump,Guard,BoundReg,_,
+                             _,_,_,_,Table,_,_,_,_,_),
+    riscv_outside_table_const_walk(Beg,End,_,BoundReg,Bound,Guard).
+
+.decl riscv_outside_table_entry_index(Jump:address,Bound:number,Index:number)
+riscv_outside_table_entry_index(Jump,Bound,0):-
+    riscv_outside_table_envelope(_,_,Jump,_,Bound,_).
+riscv_outside_table_entry_index(Jump,Bound,Index+1):-
+    riscv_outside_table_entry_index(Jump,Bound,Index), Index < Bound.
+
+.decl riscv_outside_table_storage(Jump:address,Bound:number,Table:address,
+                                Limit:address)
+riscv_outside_table_storage(Jump,Bound,Table,Limit):-
+    riscv_outside_table_envelope(_,_,Jump,_,Bound,Table),
+    Limit = Table+as(4*(Bound+1),address),
+    loaded_section(SecBeg,SecEnd,Name), SecBeg <= Table, Limit <= SecEnd,
+    section_type(Name,1), section_property(Name,"Initialized"),
+    section_property(Name,"Readable"),
+    !section_property(Name,"Writable"),
+    !section_property(Name,"Executable"),
+    !section_property(Name,"ThreadLocal"),
+    byte_interval(BIBeg,BIEnd), BIBeg <= Table, Limit <= BIEnd.
+
+.decl riscv_outside_table_entry(Jump:address,Bound:number,Index:number,
+                              EA:address,Value:number,Target:address)
+riscv_outside_table_entry(Jump,Bound,Index,EA,Value,Target):-
+    riscv_outside_table_storage(Jump,Bound,Table,_),
+    riscv_outside_table_entry_index(Jump,Bound,Index),
+    EA = Table+as(4*Index,address), data_word(EA,4,Value),
+    Value >= -2147483648, Value <= 2147483647,
+    as(Table,number)+Value > 0,
+    as(Table,number)+Value < 0x7fffffff00000000,
+    Target = as(as(Table,number)+Value,address).
+
+// Q0/const_walk above use E0 only. This provisional E1 is formed BEFORE
+// roots, complete RD, window proof or region refusals. Missing or
+// malformed envelopes are whole-region failures, never a partial oracle.
+.decl riscv_outside_table_pre_expected(EA:address,Next:address)
+riscv_outside_table_pre_expected(EA,Next):-
+    riscv_outside_early_expected_next(EA,Next).
+riscv_outside_table_pre_expected(Jump,Target):-
+    riscv_outside_table_envelope(_,_,Jump,_,Bound,_),
+    riscv_outside_table_entry(Jump,Bound,_,_,_,Target).
+.decl riscv_outside_table_pre_next(EA:address,Next:address)
+riscv_outside_table_pre_next(EA,Next):-
+    riscv_outside_table_pre_expected(EA,Next), code(EA), code(Next).
+.decl riscv_outside_table_pre_region(Beg:address,End:address,
+                                    EA:address,Next:address)
+riscv_outside_table_pre_region(Beg,End,EA,Next):-
+    riscv_outside_table_node(Beg,End,EA),
+    riscv_outside_table_pre_next(EA,Next),
+    riscv_outside_table_node(Beg,End,Next).
+.decl riscv_outside_table_proof_query(Beg:address,End:address,
+                                     EA:address,Reg:register)
+riscv_outside_table_proof_query(Beg,End,EA,Reg):-
+    riscv_outside_table_shape(Beg,End,Jump,_,_,_,_,_,_,_,_,_,_,_,_,_),
+    riscv_outside_table_use_requirement(Jump,EA,Reg,_).
+riscv_outside_table_proof_query(Beg,End,Guard,BoundReg),
+riscv_outside_table_proof_query(Beg,End,Guard,IndexReg),
+riscv_outside_table_proof_query(Beg,End,Shift,IndexReg):-
+    riscv_outside_table_shape(Beg,End,_,Guard,BoundReg,IndexReg,
+                             _,_,_,_,_,Shift,_,_,_,_).
+riscv_outside_table_proof_query(Beg,End,Prev,Reg):-
+    riscv_outside_table_proof_query(Beg,End,EA,Reg),
+    riscv_outside_table_pre_region(Beg,End,Prev,EA),
+    !riscv_outside_table_kill(Prev,Reg).
+
+.decl riscv_outside_table_root(Beg:address,End:address,EA:address)
+riscv_outside_table_root(Beg,End,Beg):- riscv_outside_table_region(Beg,End).
+riscv_outside_table_root(Beg,End,EA):-
+    riscv_outside_table_node(Beg,End,EA), entry_point(EA).
+riscv_outside_table_root(Beg,End,EA):-
+    riscv_outside_table_node(Beg,End,EA), fde_addresses(EA,_).
+riscv_outside_table_root(Beg,End,EA):-
+    riscv_outside_table_node(Beg,End,EA),
+    !riscv_outside_table_pre_region(Beg,End,_,EA).
+riscv_outside_table_root(Beg,End,EA):-
+    riscv_outside_table_node(Beg,End,EA),
+    riscv_outside_table_immediate_call(_,EA).
+riscv_outside_table_root(Beg,End,EA):-
+    riscv_outside_table_node(Beg,End,EA),
+    riscv_outside_far_control_target(_,EA).
+riscv_outside_table_root(Beg,End,EA):-
+    riscv_outside_table_node(Beg,End,EA),
+    riscv_outside_table_pre_expected(Prev,EA), (Prev < Beg; Prev >= End).
+
+.decl riscv_outside_table_root_reachable(Beg:address,End:address,EA:address)
+riscv_outside_table_root_reachable(Beg,End,EA):-
+    riscv_outside_table_root(Beg,End,EA).
+riscv_outside_table_root_reachable(Beg,End,Next):-
+    riscv_outside_table_root_reachable(Beg,End,EA),
+    riscv_outside_table_pre_region(Beg,End,EA,Next).
+
+.decl riscv_outside_table_rd(Beg:address,End:address,
+                           EA:address,Reg:register,Def:address)
+riscv_outside_table_rd(Beg,End,EA,Reg,0):-
+    riscv_outside_table_proof_query(Beg,End,EA,Reg),
+    riscv_outside_table_root(Beg,End,EA).
+// Every unrooted demanded query retains an unknown alternative. An isolated
+// cycle may never make complete RD true by simply losing its initial input.
+riscv_outside_table_rd(Beg,End,EA,Reg,0):-
+    riscv_outside_table_proof_query(Beg,End,EA,Reg),
+    !riscv_outside_table_root_reachable(Beg,End,EA).
+riscv_outside_table_rd(Beg,End,Next,Reg,EA):-
+    riscv_outside_table_proof_query(Beg,End,Next,Reg),
+    riscv_outside_table_pre_region(Beg,End,EA,Next),
+    riscv_outside_table_kill(EA,Reg).
+riscv_outside_table_rd(Beg,End,Next,Reg,Def):-
+    riscv_outside_table_proof_query(Beg,End,Next,Reg),
+    riscv_outside_table_pre_region(Beg,End,EA,Next),
+    !riscv_outside_table_kill(EA,Reg),
+    riscv_outside_table_rd(Beg,End,EA,Reg,Def).
+
+.decl riscv_outside_table_avoid_guard(Jump:address,EA:address)
+riscv_outside_table_avoid_guard(Jump,EA):-
+    riscv_outside_table_shape(Beg,End,Jump,Guard,_,_,
+                             _,_,_,_,_,_,_,_,_,_),
+    riscv_outside_table_root(Beg,End,EA), EA != Guard.
+riscv_outside_table_avoid_guard(Jump,Next):-
+    riscv_outside_table_shape(Beg,End,Jump,Guard,_,_,
+                             _,_,_,_,_,_,_,_,_,_),
+    riscv_outside_table_avoid_guard(Jump,EA),
+    riscv_outside_table_pre_region(Beg,End,EA,Next), Next != Guard.
+
+// Visiting Guard alone does not establish its bounded fallthrough. The taken
+// arm may equal Hi or may loop back into the suffix without checking Guard
+// again. Follow that actual arm in independent provisional E1, including any
+// excursion outside the FDE, and reject every suffix reentry before Guard.
+.decl riscv_outside_table_taken_avoid_guard(Jump:address,EA:address)
+.decl riscv_outside_table_proof_reset(Jump:address,Reset:address)
+riscv_outside_table_proof_reset(Jump,Guard):-
+    riscv_outside_table_shape(_,_,Jump,Guard,_,_,_,_,_,_,_,_,_,_,_,_),
+    !riscv_outside_table_two_suffix(_,_,Jump,_,_,_,_,_,_,_,_,_,_,_,_,_,_).
+riscv_outside_table_proof_reset(Jump,MapLoad):-
+    riscv_outside_table_two_prefix(_,_,Jump,_,_,_,_,_,_,_,_,_,_,_,_,MapLoad,_,_,_,_).
+riscv_outside_table_taken_avoid_guard(Jump,Target):-
+    riscv_outside_table_shape(_,_,Jump,Guard,_,_,
+                             _,_,_,_,_,_,_,_,_,_),
+    riscv_outside_table_immediate_jump(Guard,Target),
+    riscv_outside_table_proof_reset(Jump,Reset), Target != Reset.
+riscv_outside_table_taken_avoid_guard(Jump,Next):-
+    riscv_outside_table_shape(_,_,Jump,Guard,_,_,
+                             _,_,_,_,_,_,_,_,_,_),
+    riscv_outside_table_taken_avoid_guard(Jump,EA),
+    riscv_outside_table_proof_reset(Jump,Reset),
+    riscv_outside_table_pre_next(EA,Next), Next != Reset.
+
+// The final index bound is established by the actual runtime guard and the
+// same-address reload, never by a numeric first-map counter or its field hull.
+// Keep the callee-saved set solely for independent call-state obligations.
+.decl riscv_outside_table_saved(Reg:register)
+riscv_outside_table_saved("S0").
+riscv_outside_table_saved("S1").
+riscv_outside_table_saved("S2").
+riscv_outside_table_saved("S3").
+riscv_outside_table_saved("S4").
+riscv_outside_table_saved("S5").
+riscv_outside_table_saved("S6").
+riscv_outside_table_saved("S7").
+riscv_outside_table_saved("S8").
+riscv_outside_table_saved("S9").
+riscv_outside_table_saved("S10").
+riscv_outside_table_saved("S11").
+
+// The discarded counter walks add no obligation path. The actual taken arm
+// still follows every provisional alternative until the guard/load resets it.
+.decl riscv_outside_table_obligation_path(Jump:address,EA:address)
+riscv_outside_table_obligation_path(Jump,EA):-
+    riscv_outside_table_taken_avoid_guard(Jump,EA).
+
+// Preserve the complete producer chain of the two zero-extension halves.
+riscv_outside_table_use_requirement(Jump,Z2,Index,Z1):-
+    riscv_outside_table_two_prefix(_,_,Jump,_,_,_,Z1,Z2,Index,_,_,_,_,_,_,_,_,_,_,_).
+
+// EVERY Lg->Li path is checked, restarting only at a fresh Lg. The complete
+// provisional graph includes every table alternative and runtime LSDA edge.
+.decl riscv_outside_table_window_forward(Jump:address,EA:address)
+.decl riscv_outside_table_window_back(Jump:address,EA:address)
+.decl riscv_outside_table_window(Jump:address,EA:address)
+riscv_outside_table_window_forward(Jump,Next):-
+    riscv_outside_table_two_prefix(_,_,Jump,_,_,_,_,_,_,_,_,_,_,_,_,Lg,_,_,Li,_),
+    riscv_outside_table_pre_next(Lg,Next), Next != Lg.
+riscv_outside_table_window_forward(Jump,Next):-
+    riscv_outside_table_two_prefix(_,_,Jump,_,_,_,_,_,_,_,_,_,_,_,_,Lg,_,_,Li,_),
+    riscv_outside_table_window_forward(Jump,EA), EA != Li,
+    riscv_outside_table_pre_next(EA,Next), Next != Lg.
+riscv_outside_table_window_back(Jump,Prev):-
+    riscv_outside_table_two_prefix(_,_,Jump,_,_,_,_,_,_,_,_,_,_,_,_,Lg,_,_,Li,_),
+    riscv_outside_table_pre_next(Prev,Li), Prev != Lg.
+riscv_outside_table_window_back(Jump,Prev):-
+    riscv_outside_table_two_prefix(_,_,Jump,_,_,_,_,_,_,_,_,_,_,_,_,Lg,_,_,_,_),
+    riscv_outside_table_window_back(Jump,EA),
+    riscv_outside_table_pre_next(Prev,EA), Prev != Lg.
+riscv_outside_table_window(Jump,EA):-
+    riscv_outside_table_window_forward(Jump,EA),
+    riscv_outside_table_window_back(Jump,EA).
+.decl riscv_outside_table_regonly(EA:address)
+riscv_outside_table_regonly(EA):-
+    riscv_outside_table_node(_,_,EA), instruction_get_operation(EA,Op),
+    (Op = "LI"; Op = "C.LI"; Op = "LUI"; Op = "C.LUI";
+     Op = "MV"; Op = "C.MV"; Op = "ADDI"; Op = "C.ADDI";
+     Op = "ADD"; Op = "C.ADD"; Op = "SUB"; Op = "C.SUB";
+     Op = "ANDI"; Op = "C.ANDI"; Op = "AND"; Op = "OR"; Op = "XOR";
+     Op = "SLLI"; Op = "C.SLLI"; Op = "SRLI"; Op = "C.SRLI";
+     Op = "NOP"; Op = "C.NOP"),
+    !arch.memory_access(_,EA,_,_,_,_,_,_,_), !arch.call(EA,_), !arch.jump(EA).
+.decl riscv_outside_table_load_avoid(Jump:address,EA:address)
+riscv_outside_table_load_avoid(Jump,EA):-
+    riscv_outside_table_two_prefix(Beg,End,Jump,_,_,_,_,_,_,_,_,_,_,_,_,Lg,_,_,_,_),
+    riscv_outside_table_root(Beg,End,EA), EA != Lg.
+riscv_outside_table_load_avoid(Jump,Next):-
+    riscv_outside_table_two_prefix(Beg,End,Jump,_,_,_,_,_,_,_,_,_,_,_,_,Lg,_,_,_,_),
+    riscv_outside_table_load_avoid(Jump,EA),
+    riscv_outside_table_pre_region(Beg,End,EA,Next), Next != Lg.
+
+// Region-level failures are positive and computed before all exports. They
+// never read outside candidate/refusal/certificate state. All independently
+// recognized tables in the FDE share the same closed incoming-edge proof.
+.decl riscv_outside_table_region_refusal(Beg:address,End:address,
+                                      At:address,Reason:symbol)
+riscv_outside_table_region_refusal(Beg,End,Beg,"overlapping-runtime-region"):-
+    riscv_outside_table_region(Beg,End), fde_addresses(OtherBeg,OtherEnd),
+    (Beg != OtherBeg; End != OtherEnd),
+    Beg < OtherEnd, OtherBeg < End.
+riscv_outside_table_region_refusal(Beg,End,Table,"overlapping-table-section"):-
+    riscv_outside_table_envelope(Beg,End,Jump,_,Bound,Table),
+    riscv_outside_table_storage(Jump,Bound,Table,Limit),
+    loaded_section(SecBeg1,SecEnd1,Name1),
+    loaded_section(SecBeg2,SecEnd2,Name2),
+    (Name1 != Name2; SecBeg1 != SecBeg2; SecEnd1 != SecEnd2),
+    SecBeg1 < Limit, Table < SecEnd1,
+    SecBeg2 < Limit, Table < SecEnd2.
+riscv_outside_table_region_refusal(Beg,End,Table,"overlapping-table-byte-interval"):-
+    riscv_outside_table_envelope(Beg,End,Jump,_,Bound,Table),
+    riscv_outside_table_storage(Jump,Bound,Table,Limit),
+    byte_interval(BIBeg1,BIEnd1), byte_interval(BIBeg2,BIEnd2),
+    (BIBeg1 != BIBeg2; BIEnd1 != BIEnd2),
+    BIBeg1 < Limit, Table < BIEnd1, BIBeg2 < Limit, Table < BIEnd2.
+riscv_outside_table_region_refusal(Beg,End,EA,"unmatched-indirect-entry"):-
+    riscv_outside_table_register_jump(Beg,End,EA),
+    !riscv_outside_table_shape(Beg,End,EA,_,_,_,_,_,_,_,_,_,_,_,_,_).
+riscv_outside_table_region_refusal(Beg,End,Jump,"missing-constant-bound"):-
+    riscv_outside_table_shape(Beg,End,Jump,_,_,_,_,_,_,_,_,_,_,_,_,_),
+    !riscv_outside_table_envelope(Beg,End,Jump,_,_,_).
+riscv_outside_table_region_refusal(Beg,End,EA,"non-code-successor"):-
+    riscv_outside_table_corridor(Jump,_,EA),
+    riscv_outside_table_shape(Beg,End,Jump,_,_,_,_,_,_,_,_,_,_,_,_,_),
+    riscv_outside_table_pre_expected(EA,Next),
+    !riscv_outside_table_node(Beg,End,Next).
+riscv_outside_table_region_refusal(Beg,End,EA,"relocated-dispatch-instruction"):-
+    riscv_outside_table_shape(Beg,End,Jump,Guard,_,_,
+                             _,_,_,_,_,_,_,_,_,_),
+    (riscv_outside_table_corridor(Jump,Guard,EA); EA = Guard),
+    relocation(EA,_,_,_,_,_,_).
+riscv_outside_table_region_refusal(Beg,End,Jump,"guard-does-not-dominate"):-
+    riscv_outside_table_shape(Beg,End,Jump,_,_,_,_,_,_,_,_,_,_,_,_,_),
+    riscv_outside_table_avoid_guard(Jump,Jump).
+riscv_outside_table_region_refusal(Beg,End,Guard,"missing-taken-target-code"):-
+    riscv_outside_table_shape(Beg,End,_,Guard,_,_,
+                             _,_,_,_,_,_,_,_,_,_),
+    riscv_outside_table_immediate_jump(Guard,Target), !code(Target).
+riscv_outside_table_region_refusal(Beg,End,EA,"taken-edge-bypasses-bound"):-
+    riscv_outside_table_shape(Beg,End,Jump,Guard,_,_,
+                             _,_,_,_,_,_,_,_,_,_),
+    riscv_outside_table_taken_avoid_guard(Jump,EA),
+    riscv_outside_table_corridor(Jump,Guard,EA).
+// An unresolved path is not evidence that the taken arm cannot reenter.
+// Accepted table edges never repair this provisional proof walk.
+riscv_outside_table_region_refusal(Beg,End,EA,"unresolved-taken-jump"):-
+    riscv_outside_table_shape(Beg,End,Jump,_,_,_,
+                             _,_,_,_,_,_,_,_,_,_),
+    riscv_outside_table_obligation_path(Jump,EA), arch.jump(EA),
+    !riscv_outside_table_immediate_jump(EA,_),
+    !riscv_outside_table_envelope(_,_,EA,_,_,_).
+riscv_outside_table_region_refusal(Beg,End,EA,"non-code-taken-successor"):-
+    riscv_outside_table_shape(Beg,End,Jump,_,_,_,
+                             _,_,_,_,_,_,_,_,_,_),
+    riscv_outside_table_obligation_path(Jump,EA),
+    riscv_outside_table_pre_expected(EA,Next), !code(Next).
+riscv_outside_table_region_refusal(Beg,End,EA,"missing-taken-continuation"):-
+    riscv_outside_table_shape(Beg,End,Jump,_,_,_,
+                             _,_,_,_,_,_,_,_,_,_),
+    riscv_outside_table_obligation_path(Jump,EA), !arch.return(EA),
+    !riscv_outside_table_pre_expected(EA,_),
+    !riscv_outside_c_noreturn_plt_call(EA).
+riscv_outside_table_region_refusal(Beg,End,EA,"unmodeled-taken-system-path"):-
+    riscv_outside_table_shape(Beg,End,Jump,_,_,_,
+                             _,_,_,_,_,_,_,_,_,_),
+    riscv_outside_table_obligation_path(Jump,EA),
+    instruction_get_operation(EA,Operation),
+    (Operation = "ECALL"; Operation = "EBREAK"; Operation = "C.EBREAK";
+     Operation = "MRET"; Operation = "SRET"; Operation = "URET";
+     Operation = "DRET"; Operation = "WFI"; substr(Operation,0,3) = "CSR").
+riscv_outside_table_region_refusal(Beg,End,EA,"ecall-with-demanded-proof"):-
+    riscv_outside_table_proof_query(Beg,End,EA,_), instruction_get_operation(EA,"ECALL").
+riscv_outside_table_region_refusal(Beg,End,EA,"call-state-not-nonexplicit-saved-register"):-
+    riscv_outside_table_proof_query(Beg,End,EA,Reg), arch.call(EA,_),
+    (!riscv_outside_table_saved(Reg); basic_reg_def_use.used_explicit(EA,Reg,_)).
+riscv_outside_table_region_refusal(Beg,End,EA,"entry-after-guard"):-
+    riscv_outside_table_shape(Beg,End,Jump,Guard,_,_,
+                             _,_,_,_,_,_,_,_,_,_),
+    riscv_outside_table_corridor(Jump,Guard,EA),
+    riscv_outside_table_root(Beg,End,EA).
+riscv_outside_table_region_refusal(Beg,End,Guard,"ambiguous-bound-definition"):-
+    riscv_outside_table_envelope(Beg,End,Jump,Guard,Bound,_),
+    riscv_outside_table_shape(Beg,End,Jump,Guard,BoundReg,_,
+                             _,_,_,_,_,_,_,_,_,_),
+    riscv_outside_table_rd(Beg,End,Guard,BoundReg,Def),
+    !riscv_outside_table_const_def(Def,BoundReg,Bound).
+riscv_outside_table_region_refusal(Beg,End,Guard,"missing-bound-reaching-input"):-
+    riscv_outside_table_shape(Beg,End,_,Guard,BoundReg,_,
+                             _,_,_,_,_,_,_,_,_,_),
+    !riscv_outside_table_rd(Beg,End,Guard,BoundReg,_).
+riscv_outside_table_region_refusal(Beg,End,EA,"conflicting-reaching-definition"):-
+    riscv_outside_table_shape(Beg,End,Jump,_,_,_,_,_,_,_,_,_,_,_,_,_),
+    riscv_outside_table_use_requirement(Jump,EA,Reg,Expected),
+    riscv_outside_table_rd(Beg,End,EA,Reg,Def), Def != Expected.
+riscv_outside_table_region_refusal(Beg,End,EA,"missing-reaching-definition"):-
+    riscv_outside_table_shape(Beg,End,Jump,_,_,_,_,_,_,_,_,_,_,_,_,_),
+    riscv_outside_table_use_requirement(Jump,EA,Reg,Expected),
+    !riscv_outside_table_rd(Beg,End,EA,Reg,Expected).
+riscv_outside_table_region_refusal(Beg,End,Shift,"index-changed-after-guard"):-
+    riscv_outside_table_shape(Beg,End,_,Guard,_,Index,
+                             _,_,_,_,_,Shift,_,_,_,_),
+    riscv_outside_table_rd(Beg,End,Shift,Index,Def),
+    !riscv_outside_table_rd(Beg,End,Guard,Index,Def).
+riscv_outside_table_region_refusal(Beg,End,Shift,"index-input-not-retained"):-
+    riscv_outside_table_shape(Beg,End,_,Guard,_,Index,
+                             _,_,_,_,_,Shift,_,_,_,_),
+    riscv_outside_table_rd(Beg,End,Guard,Index,Def),
+    !riscv_outside_table_rd(Beg,End,Shift,Index,Def).
+riscv_outside_table_region_refusal(Beg,End,Table,"mutable-or-missing-table-storage"):-
+    riscv_outside_table_envelope(Beg,End,Jump,_,Bound,Table),
+    !riscv_outside_table_storage(Jump,Bound,Table,_).
+riscv_outside_table_region_refusal(Beg,End,EA,"missing-raw-signed32-entry"):-
+    riscv_outside_table_envelope(Beg,End,Jump,_,Bound,Table),
+    riscv_outside_table_entry_index(Jump,Bound,Index),
+    EA = Table+as(4*Index,address),
+    !riscv_outside_table_entry(Jump,Bound,Index,_,_,_).
+riscv_outside_table_region_refusal(Beg,End,Rel,"relocation-in-table-section"):-
+    riscv_outside_table_envelope(Beg,End,Jump,_,Bound,Table),
+    loaded_section(SecBeg,SecEnd,_), SecBeg <= Table, Table < SecEnd,
+    relocation(Rel,_,_,_,_,_,_),
+    SecBeg <= Rel, Rel < SecEnd.
+riscv_outside_table_region_refusal(Beg,End,Target,"target-outside-decoded-function"):-
+    riscv_outside_table_envelope(Beg,End,Jump,_,Bound,_),
+    riscv_outside_table_entry(Jump,Bound,_,_,_,Target),
+    !riscv_outside_table_node(Beg,End,Target).
+riscv_outside_table_region_refusal(Beg,End,Target,"table-target-enters-guard-corridor"):-
+    riscv_outside_table_envelope(Beg,End,Jump,_,Bound,_),
+    riscv_outside_table_entry(Jump,Bound,_,_,_,Target),
+    riscv_outside_table_shape(Beg,End,Other,Guard,_,_,
+                             _,_,_,_,_,_,_,_,_,_),
+    riscv_outside_table_corridor(Other,Guard,Target).
+
+// Every two-level missing piece is a positive region failure. No guarded
+// word value is obtained from data_word/data_uword, a name or RELRO metadata.
+riscv_outside_table_region_refusal(Beg,End,EA,"relocated-two-level-prefix"):-
+    riscv_outside_table_two_prefix(Beg,End,Jump,_,_,_,Z1,_,_,_,_,_,_,_,_,_,_,_,_,_),
+    riscv_outside_table_node(Beg,End,EA), Z1 <= EA, EA <= Jump,
+    relocation(EA,_,_,_,_,_,_).
+riscv_outside_table_region_refusal(Beg,End,Li,"guarded-load-does-not-dominate-reload"):-
+    riscv_outside_table_two_prefix(Beg,End,Jump,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,Li,_),
+    riscv_outside_table_load_avoid(Jump,Li).
+riscv_outside_table_region_refusal(Beg,End,Li,"in-range-edge-does-not-dominate-reload"):-
+    riscv_outside_table_two_prefix(Beg,End,Jump,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,Li,_),
+    riscv_outside_table_avoid_guard(Jump,Li).
+riscv_outside_table_region_refusal(Beg,End,G,"taken-arm-reuses-stale-guarded-load"):-
+    riscv_outside_table_two_prefix(Beg,End,Jump,G,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,_),
+    riscv_outside_table_taken_avoid_guard(Jump,G).
+riscv_outside_table_region_refusal(Beg,End,EA,"guard-reload-window-not-register-only"):-
+    riscv_outside_table_two_prefix(Beg,End,Jump,Guard,_,_,_,_,_,_,_,_,_,_,_,_,_,_,Li,_),
+    riscv_outside_table_window(Jump,EA), EA != Guard, EA != Li,
+    !riscv_outside_table_regonly(EA).
+riscv_outside_table_region_refusal(Beg,End,EA,"guard-reload-address-or-value-redefined"):-
+    riscv_outside_table_two_prefix(Beg,End,Jump,_,G,_,_,_,_,_,_,_,_,_,_,_,_,_,Li,Work),
+    riscv_outside_table_window(Jump,EA), EA != Li,
+    (riscv_outside_table_kill(EA,Work); riscv_outside_table_kill(EA,G)).
+
+// A global obligation walk can enter another demanded provisional region.
+// Its failures propagate positively BEFORE the common negative emission gate.
+.decl riscv_outside_table_region_dependency(Beg:address,End:address,
+                                           OtherBeg:address,OtherEnd:address)
+riscv_outside_table_region_dependency(Beg,End,OtherBeg,OtherEnd):-
+    riscv_outside_table_shape(Beg,End,Jump,_,_,_,_,_,_,_,_,_,_,_,_,_),
+    riscv_outside_table_obligation_path(Jump,EA),
+    riscv_outside_table_envelope(OtherBeg,OtherEnd,EA,_,_,_).
+riscv_outside_table_region_refusal(Beg,End,OtherBeg,"dependent-provisional-region-refusal"):-
+    riscv_outside_table_region_dependency(Beg,End,OtherBeg,OtherEnd),
+    riscv_outside_table_region_refusal(OtherBeg,OtherEnd,_,_).
+
+.decl riscv_outside_table_region_bad(Beg:address,End:address)
+riscv_outside_table_region_bad(Beg,End):-
+    riscv_outside_table_region_refusal(Beg,End,_,_).
+riscv_outside_table_refusal(Jump,At,Reason):-
+    riscv_outside_table_register_jump(Beg,End,Jump),
+    riscv_outside_table_region_refusal(Beg,End,At,Reason).
+riscv_outside_table_certificate(Jump,Guard,Bound,Table,Beg,End):-
+    riscv_outside_table_envelope(Beg,End,Jump,Guard,Bound,Table),
+    !riscv_outside_table_region_bad(Beg,End).
+riscv_outside_table_target(Jump,Target):-
+    riscv_outside_table_certificate(Jump,_,Bound,_,_,_),
+    riscv_outside_table_entry(Jump,Bound,_,_,_,Target).

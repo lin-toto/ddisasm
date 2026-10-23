@@ -377,6 +377,8 @@ endif()
 
 set(DATALOG_RISCV_SOURCES
     datalog/arch/riscv_symbolization.dl
+    datalog/arch/riscv_outside_section.dl
+    datalog/arch/riscv_outside_jump_table.dl
     datalog/arch/riscv/arch_riscv.dl
     datalog/arch/riscv/float_operations.dl
     datalog/arch/riscv/interrupt_operations.dl

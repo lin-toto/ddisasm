@@ -1,0 +1,1132 @@
+//===- riscv_outside_section.dl ----------------------------*- datalog -*-===//
+//
+// Copyright (C) 2026 GrammaTech, Inc.
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// Binary-only, conservative recovery of biased PC-relative data bases.
+// This analysis deliberately does not use reg_def_use.def_used: that relation
+// documents an underapproximation and is not a completeness certificate.
+// Unhandled scalar bounds, escapes, stack aliases or CFG paths refuse emission.
+// No DWARF fact, source annotation or per-binary address is input. The sole
+// name-based exception is a dynamically bound C exit PLT non-return boundary.
+
+.decl riscv_outside_section_candidate(Hi:address,Lo:address,Index:operand_index,
+                                    Reg:register,Target:address)
+.output riscv_outside_section_candidate
+
+// Seed geometry independently of reaching definitions. The candidate below
+// uses the complete instruction walk, including nonadjacent lower consumers.
+.decl riscv_outside_pair_seed(Hi:address,Lo:address,Index:operand_index,
+                             Reg:register,Target:address)
+.decl riscv_outside_lower(Lo:address,Index:operand_index,
+                         Reg:register,Offset:number)
+riscv_outside_lower(Lo,2,Reg,Offset):-
+    arch.reg_arithmetic_operation(Lo,_,Reg,1,Offset),
+    instruction_get_operation(Lo,"ADDI"),
+    !arch.memory_access(_,Lo,_,_,_,_,_,_,_).
+riscv_outside_lower(Lo,Index,Reg,Offset):-
+    arch.memory_access("LOAD",Lo,Index,_,_,Base,"NONE",_,Offset),
+    reg_nonnull(Base,Reg).
+riscv_outside_lower(Lo,Index,Reg,Offset):-
+    arch.memory_access("STORE",Lo,_,Index,_,Base,"NONE",_,Offset),
+    reg_nonnull(Base,Reg).
+
+.decl riscv_outside_last_loaded_end(End:address)
+riscv_outside_last_loaded_end(End):-
+    loaded_section(_,_,Name), !section_property(Name,"ThreadLocal"),
+    End = max E:{ loaded_section(_,E,N), !section_property(N,"ThreadLocal") }.
+
+// DDisasm places TLS in a separate artificial address range. Binary
+// ThreadLocal flags exclude that range from the ordinary allocated frontier.
+// TLS still cannot be an anchor, and an inside-any-loaded-range target refuses.
+// Conservative TLS limit: when ordinary Last is within 2 KiB of a page end,
+// a target in the loader's rebased TLS range still refuses. TLS-address
+// candidates never become eligible merely by adjusting the frontier.
+.decl riscv_outside_near_upper(Hi:address,Reg:register,Base:address)
+riscv_outside_near_upper(Hi,Reg,Base):-
+    binary_format("ELF"), binary_isa("RISCV64"),
+    (binary_type("EXEC"); binary_type("DYN")),
+    riscv_auipc(Hi,Reg,Base),
+    riscv_outside_last_loaded_end(Last),
+    as(Base,number) >= as(Last,number)-2047,
+    as(Base,number) <= as(Last,number)+4095,
+    Hi < 0x7fffffff00000000, Base < 0x7ffffffffff00000,
+    code(Hi), !instruction_has_relocation(Hi,_),
+    !relocation(Hi,_,_,_,_,_,_),
+    !arch.stack_pointer(Reg), Reg != "GP", Reg != "TP", Reg != "ZERO".
+
+.decl riscv_outside_upper_enabled()
+riscv_outside_upper_enabled():- riscv_outside_near_upper(_,_,_).
+.decl riscv_outside_upper_walk(Hi:address,EA:address,Reg:register)
+riscv_outside_upper_walk(Hi,Next,Reg):-
+    riscv_outside_near_upper(Hi,Reg,_), riscv_outside_next(Hi,Next).
+riscv_outside_upper_walk(Hi,Next,Reg):-
+    riscv_outside_upper_walk(Hi,EA,Reg), riscv_outside_next(EA,Next),
+    !riscv_outside_kill(EA,Reg).
+
+.decl riscv_outside_section_geometry_error()
+// Address zero is reserved for unknown reaching input in this proof.
+riscv_outside_section_geometry_error():- code(0).
+riscv_outside_section_geometry_error():-
+    section(Name,Size,_,_,_), Size > 0,
+    loaded_section(Beg,End,Name), End <= Beg.
+riscv_outside_section_geometry_error():-
+    loaded_section(Beg1,End1,Name1), loaded_section(Beg2,End2,Name2),
+    (Name1 != Name2; Beg1 != Beg2; End1 != End2),
+    Beg1 < End2, Beg2 < End1.
+riscv_outside_section_geometry_error():-
+    byte_interval(Beg,End), End <= Beg.
+riscv_outside_section_geometry_error():-
+    byte_interval(Beg1,End1), byte_interval(Beg2,End2),
+    (Beg1 != Beg2; End1 != End2), Beg1 < End2, Beg2 < End1.
+
+.decl riscv_outside_in_section(Target:address)
+riscv_outside_in_section(Target):-
+    riscv_outside_pair_geometry(_,_,_,_,Target),
+    loaded_section(Beg,End,_), Beg <= Target, Target < End.
+
+.decl riscv_outside_pair_geometry(Hi:address,Lo:address,Index:operand_index,
+                                 Reg:register,Target:address)
+
+// A memory lower is an access, never a definition of a pointer. If its
+// completed address is outside data, the later access certificate refuses it.
+riscv_outside_pair_geometry(Hi,Lo,Index,Reg,Target):-
+    riscv_outside_near_upper(Hi,Reg,Base),
+    riscv_outside_upper_walk(Hi,Lo,Reg),
+    riscv_outside_lower(Lo,Index,Reg,Offset), code(Lo),
+    !instruction_has_relocation(Lo,_), !relocation(Lo,_,_,_,_,_,_),
+    // Keep signed arithmetic away from overflow before converting addresses.
+    // The high virtual-address range is deliberately unsupported; the AUIPC
+    // signed 32-bit displacement cannot overflow at an admitted HI address.
+    Hi < 0x7fffffff00000000,
+    Base < 0x7ffffffffff00000,
+    Offset >= -2048, Offset <= 2047,
+    as(Base,number)+Offset >= 0,
+    Target = as(as(Base,number)+Offset,address),
+    riscv_outside_last_loaded_end(Last),
+    Target > Last, Target-Last <= 2047,
+    !riscv_outside_section_geometry_error(),
+    !arch.stack_pointer(Reg), Reg != "GP", Reg != "TP", Reg != "ZERO".
+
+riscv_outside_pair_seed(Hi,Lo,Index,Reg,Target):-
+    riscv_outside_pair_geometry(Hi,Lo,Index,Reg,Target),
+    !riscv_outside_in_section(Target).
+
+riscv_outside_section_candidate(Hi,Lo,Index,Reg,Target):-
+    riscv_outside_pair_seed(Hi,Lo,Index,Reg,Target),
+    riscv_outside_rd(Lo,Reg,Hi).
+
+.decl riscv_outside_lower_ambiguous(Hi:address,Lo:address)
+riscv_outside_lower_ambiguous(Hi,Lo):-
+    riscv_outside_section_candidate(Hi,Lo,_,Reg,_),
+    riscv_outside_rd(Lo,Reg,Other), Other != Hi.
+
+// A completed value needs a real ADDI and every reaching upper definition.
+// This relation uses only the independent instruction graph, not emission.
+.decl riscv_outside_complete_base(Def:address,Reg:register,Target:address)
+riscv_outside_complete_base(Lo,Dst,Target):-
+    riscv_outside_section_candidate(Hi,Lo,_,Upper,Target),
+    !riscv_outside_lower_ambiguous(Hi,Lo),
+    arch.reg_arithmetic_operation(Lo,Dst,Upper,1,_),
+    instruction_get_operation(Lo,"ADDI"),
+    !arch.memory_access(_,Lo,_,_,_,_,_,_,_).
+
+// The raw HI value is not a completed base: relayout changes its low bits.
+// No unmatched memory, copy, arithmetic or escape use may consume it.
+.decl riscv_outside_high_at(Hi:address,Lo:address,EA:address,Reg:register)
+riscv_outside_high_at(Hi,Lo,EA,Reg):-
+    riscv_outside_section_candidate(Hi,Lo,_,Reg,_),
+    riscv_outside_rd(EA,Reg,Hi).
+
+.decl riscv_outside_enabled()
+riscv_outside_enabled():- riscv_outside_pair_seed(_,_,_,_,_).
+
+// Complete forward instruction edges for this proof. Function-symbol extents
+// do not delimit the walk. Only decoded literal operands establish direct
+// targets: legacy direct_call/direct_jump may suppress a relocated immediate
+// or use incomplete register inference and are not completeness inputs.
+.decl riscv_outside_direct_call(EA:address,Target:address)
+riscv_outside_direct_call(EA,Target):-
+    arch.call(EA,Index),
+    instruction_get_op(EA,Index,Op), op_immediate(Op,Imm,_),
+    Target = as(Imm,address), code(EA).
+.decl riscv_outside_direct_jump(EA:address,Target:address)
+riscv_outside_direct_jump(EA,Target):-
+    arch.jump(EA), instruction_get_operation(EA,Operation),
+    arch.jump_operation_op_index(Operation,Index),
+    instruction_get_op(EA,Index,Op), op_immediate(Op,Imm,_),
+    Target = as(Imm,address), code(EA).
+// A decoded adjacent far call/tail supplies an UNKNOWN entry root, never a
+// complete flow edge. No advanced DU or inferred final expression is used.
+// JALR clears bit zero, including the compressed zero-offset forms.
+.decl riscv_outside_far_control_target(Lo:address,Target:address)
+riscv_outside_far_control_target(Lo,Target):-
+    riscv_auipc(Hi,Reg,Base), next(Hi,Lo), code(Hi), code(Lo),
+    instruction_get_operation(Lo,"JALR"),
+    instruction_get_op(Lo,1,BaseOp), op_regdirect_contains_reg(BaseOp,Reg),
+    instruction_get_op(Lo,2,ImmOp), op_immediate(ImmOp,Offset,_),
+    Offset >= -2048, Offset <= 2047,
+    Hi < 0x7fffffff00000000, Base < 0x7ffffffffff00000,
+    as(Base,number)+Offset >= 0,
+    Target = as((as(Base,number)+Offset) band -2,address).
+riscv_outside_far_control_target(Lo,Target):-
+    riscv_auipc(Hi,Reg,Base), next(Hi,Lo), code(Hi), code(Lo),
+    instruction(Lo,_,_,Operation,BaseOp,0,0,0,_,_),
+    (Operation = "C.JALR"; Operation = "C.JR"),
+    op_regdirect_contains_reg(BaseOp,Reg),
+    Hi < 0x7fffffff00000000, Base < 0x7ffffffffff00000,
+    Target = as(as(Base,number) band -2,address).
+// A register transfer inferred from a split pair/underapproximate use-def
+// relation is not a complete target proof, even if named direct_call/jump.
+.decl riscv_outside_early_expected_next(EA:address,Next:address)
+riscv_outside_early_expected_next(EA,Next):-
+    riscv_outside_upper_enabled(), may_fallthrough(EA,Next), code(EA).
+// Retain every call continuation except a direct, dynamically JUMP_SLOT-bound
+// PLT call to C exit, also confirmed by DDisasm's own refined noreturn fact.
+// ISO C 7.22.4.4 specifies that exit cannot return. This is the same dynamic
+// interface assumption made by the compiler; it is not inferred from a local
+// function name. Static, non-PLT, indirect and all other calls stay conservative.
+// The fixed allowlist is only exit; @... is DDisasm's ELF version suffix.
+// Target must be the stub's own AUIPC, followed by its LD and final JALR;
+// entering the LD with an unrelated register value is never a noreturn proof.
+// The same predicate also proves a terminating path end in the five missing-
+// successor checks below and in the early jump-table proof.
+.decl riscv_outside_c_noreturn_plt_call(EA:address)
+riscv_outside_c_noreturn_plt_call(EA):-
+    binary_format("ELF"), dynamic_entry("JMPREL",_),
+    riscv_outside_direct_call(EA,Target),
+    plt_block(Target,Name), code_in_block(Jump,Target),
+    op_immediate_and_reg(Target,"AUIPC",Reg,_,Upper),
+    riscv_signed_hi20(Upper,SignedUpper), next(Target,Load),
+    arch.load(Load,_,_,Reg,Reg,"NONE",_,Offset), next(Load,Jump),
+    GotEntry = as(as(Target,number)+(SignedUpper bshl 12)+Offset,address),
+    riscv_plt_got_entry(Jump,GotEntry),
+    relocation(GotEntry,"JUMP_SLOT",Name,_,_,_,_),
+    match("exit(@.*)?",Name), no_return_call_refined(EA).
+
+riscv_outside_early_expected_next(EA,Next):-
+    riscv_outside_upper_enabled(), next(EA,Next), arch.call(EA,_), code(EA),
+    !riscv_outside_c_noreturn_plt_call(EA).
+riscv_outside_early_expected_next(EA,Next):-
+    riscv_outside_upper_enabled(), riscv_outside_direct_jump(EA,Next), code(EA).
+// A resolved-transfer row or one guessed jump-table entry is positive evidence,
+// not completeness. Only the independent full binary table proof below may
+// later add a register-jump edge to the full graph.
+riscv_outside_early_expected_next(EA,Next):-
+    riscv_outside_upper_enabled(), lsda_callsite_addresses(Beg,End,Next),
+    code(EA), EA >= Beg, EA < End.
+.decl riscv_outside_early_next(EA:address,Next:address)
+riscv_outside_early_next(EA,Next):-
+    riscv_outside_early_expected_next(EA,Next), code(Next).
+// The table proof uses only the early graph, before its certified targets
+// enter this full graph. It cannot depend on the full RD or final exports.
+.decl riscv_outside_expected_next(EA:address,Next:address)
+riscv_outside_expected_next(EA,Next):- riscv_outside_early_expected_next(EA,Next).
+riscv_outside_expected_next(EA,Next):- riscv_outside_table_target(EA,Next).
+.decl riscv_outside_next(EA:address,Next:address)
+riscv_outside_next(EA,Next):-
+    riscv_outside_expected_next(EA,Next), code(Next).
+.decl riscv_outside_bad_successor(EA:address,Next:address)
+riscv_outside_bad_successor(EA,Next):-
+    riscv_outside_expected_next(EA,Next), !code(Next).
+
+.decl riscv_outside_kill(EA:address,Reg:register)
+// Actual instruction writes, never a conjectured ABI clobber. A local callee
+// compiled with -fipa-ra may preserve a caller-saved value across the call.
+riscv_outside_kill(EA,Reg):-
+    basic_reg_def_use.must_def(EA,Reg), !arch.call(EA,_).
+riscv_outside_kill(EA,Reg):-
+    arch.call(EA,_), register_access(EA,RegIn,"W"), reg_map(RegIn,Reg),
+    !arch.register_access_override(EA,Reg,"W",0), track_register(Reg).
+// A syscall result is a new unknown A0 definition even without an explicit
+// decoder write. A pre-ECALL integer cannot bound a later indexed access.
+riscv_outside_kill(EA,"A0"):- instruction_get_operation(EA,"ECALL").
+
+.decl riscv_outside_root(EA:address)
+riscv_outside_root(EA):-
+    riscv_outside_enabled(), code(EA), !riscv_outside_next(_,EA).
+riscv_outside_root(EA):-
+    riscv_outside_enabled(), code(EA), entry_point(EA).
+riscv_outside_root(EA):-
+    riscv_outside_enabled(), riscv_outside_direct_call(_,EA), code(EA).
+riscv_outside_root(EA):-
+    riscv_outside_enabled(), riscv_outside_far_control_target(_,EA), code(EA).
+riscv_outside_root(EA):-
+    riscv_outside_enabled(), fde_addresses(EA,_), code(EA).
+.decl riscv_outside_root_reachable(EA:address)
+riscv_outside_root_reachable(EA):- riscv_outside_root(EA).
+riscv_outside_root_reachable(Next):-
+    riscv_outside_root_reachable(EA), riscv_outside_next(EA,Next).
+
+// Sparse binary-FDE ownership. Address buckets are only an equality index:
+// they make no page/alignment or single-owner assumption. Every overlapping
+// runtime FDE owner is retained, and exact Beg<=EA<End checks decide coverage.
+// The index is gated by near-frontier interest and never scans code x FDE.
+.decl riscv_outside_fde_bucket(Beg:address,End:address,Bucket:unsigned)
+riscv_outside_fde_bucket(Beg,End,Beg/4096):-
+    riscv_outside_upper_enabled(), fde_addresses(Beg,End), End > Beg.
+riscv_outside_fde_bucket(Beg,End,Bucket+1):-
+    riscv_outside_fde_bucket(Beg,End,Bucket), Bucket < (End-1)/4096.
+
+// Physical ownership for boundary checks is independent of unknown-region
+// linking. This is a directed, node-keyed syntax walk from near-frontier HIs,
+// not the previous undirected whole-program context closure. E0/Q0 successors
+// overapproximate every certified outside_next edge without using complete RD,
+// accepted certificates or unknown-region membership as positive inputs.
+.decl riscv_outside_boundary_node(EA:address)
+riscv_outside_boundary_node(EA):- riscv_outside_near_upper(EA,_,_).
+riscv_outside_boundary_node(Next):-
+    riscv_outside_boundary_node(EA), riscv_outside_table_pre_next(EA,Next).
+
+// All uncertified non-return register jumps are considered, even when an
+// FDE-less jump is disconnected from a candidate's syntax component. There
+// are no raw readonly-word hints or arbitrary table-tail target guesses.
+.decl riscv_outside_uncertified_jump(EA:address)
+riscv_outside_uncertified_jump(EA):-
+    riscv_outside_upper_enabled(), arch.jump(EA), code(EA), !arch.return(EA),
+    !riscv_outside_direct_jump(EA,_), !riscv_outside_table_target(EA,_).
+.decl riscv_outside_fde_point(EA:address)
+riscv_outside_fde_point(EA):- riscv_outside_near_upper(EA,_,_).
+riscv_outside_fde_point(EA):- riscv_outside_boundary_node(EA).
+riscv_outside_fde_point(EA):- riscv_outside_uncertified_jump(EA).
+
+// Skip every runtime-FDE start or binary entry target globally when linking.
+// Such targets already seed unknown entry roots. Physical owner rows are
+// still retained for all boundaries; no preferred overlapping owner is chosen.
+.decl riscv_outside_nonentry_provisional_link(Jump:address,Target:address)
+riscv_outside_nonentry_provisional_link(Jump,Target):-
+    riscv_outside_uncertified_jump(Jump),
+    riscv_outside_table_pre_expected(Jump,Target), code(Target),
+    !fde_addresses(Target,_), !entry_point(Target).
+.decl riscv_outside_nonentry_direct_link(Target:address)
+riscv_outside_nonentry_direct_link(Target):-
+    riscv_outside_unknown_jump_region(Beg,End),
+    riscv_outside_direct_jump(EA,Target), !arch.call(EA,_),
+    Beg <= EA, EA < End, code(Target),
+    !fde_addresses(Target,_), !entry_point(Target).
+riscv_outside_fde_point(Target):- riscv_outside_nonentry_provisional_link(_,Target).
+riscv_outside_fde_point(Target):- riscv_outside_nonentry_direct_link(Target).
+.decl riscv_outside_context_fde(EA:address,Beg:address,End:address)
+riscv_outside_context_fde(EA,Beg,End):-
+    riscv_outside_fde_point(EA), Bucket = EA/4096,
+    riscv_outside_fde_bucket(Beg,End,Bucket), Beg <= EA, EA < End.
+
+// Binary-only scope assumption: an uncertified non-return
+// register jump targets its own FDE, an explicitly linked FDE, or an entry
+// root. Links are E0/Q0 provisional targets and decoded direct non-call
+// branches to non-entry addresses, transitively. The theoretical dispatch
+// with no near-HI whose only link to a cold part is its unrecognised table
+// stays outside this envelope. Symbol names do not establish dispatch
+// completeness; no raw-table-tail completeness claim is made.
+.decl riscv_outside_unknown_jump_own_region(Beg:address,End:address)
+.output riscv_outside_unknown_jump_own_region
+riscv_outside_unknown_jump_own_region(Beg,End):-
+    riscv_outside_uncertified_jump(EA), riscv_outside_context_fde(EA,Beg,End).
+.decl riscv_outside_unknown_jump_region(Beg:address,End:address)
+.output riscv_outside_unknown_jump_region
+riscv_outside_unknown_jump_region(Beg,End):-
+    riscv_outside_unknown_jump_own_region(Beg,End).
+riscv_outside_unknown_jump_region(Beg,End):-
+    riscv_outside_nonentry_provisional_link(_,Target),
+    riscv_outside_context_fde(Target,Beg,End).
+riscv_outside_unknown_jump_region(Beg,End):-
+    riscv_outside_nonentry_direct_link(Target),
+    riscv_outside_context_fde(Target,Beg,End).
+.decl riscv_outside_jump_fde_covered(EA:address)
+riscv_outside_jump_fde_covered(EA):-
+    riscv_outside_uncertified_jump(EA), riscv_outside_context_fde(EA,_,_).
+.decl riscv_outside_uncovered_uncertified_jump()
+riscv_outside_uncovered_uncertified_jump():-
+    riscv_outside_uncertified_jump(EA), !riscv_outside_jump_fde_covered(EA).
+.decl riscv_outside_demand_node(EA:address)
+riscv_outside_demand_node(EA):- riscv_outside_reg_query(EA,_).
+riscv_outside_demand_node(EA):- riscv_outside_slot_query(EA,_).
+// Demand coverage uses the same bucket index directly, without a slot-query
+// dependency in physical boundary ownership. A covered backward predecessor
+// is not misclassified as FDE-less merely because it precedes the HI.
+.decl riscv_outside_demand_fde_covered(EA:address)
+riscv_outside_demand_fde_covered(EA):-
+    riscv_outside_demand_node(EA), Bucket = EA/4096,
+    riscv_outside_fde_bucket(Beg,End,Bucket), Beg <= EA, EA < End.
+.decl riscv_outside_unknown_dispatch_input(EA:address)
+.output riscv_outside_unknown_dispatch_input
+riscv_outside_unknown_dispatch_input(EA):-
+    riscv_outside_unknown_jump_region(Beg,End),
+    riscv_outside_demand_node(EA), Beg <= EA, EA < End.
+riscv_outside_unknown_dispatch_input(EA):-
+    riscv_outside_demand_node(EA), riscv_outside_uncovered_uncertified_jump(),
+    !riscv_outside_demand_fde_covered(EA).
+
+// SP writes and returns are physical boundaries everywhere under the interest
+// bit, including a new spill after a branch to an unlinked FDE entry. Only the
+// node+slot relevance walk consumes them. Jump endpoints have sparse physical
+// ownership independently of the entry-skipping unknown-link envelope.
+.decl riscv_outside_same_fde_edge(EA:address,Next:address)
+riscv_outside_same_fde_edge(EA,Next):-
+    riscv_outside_boundary_node(EA), riscv_outside_next(EA,Next), arch.jump(EA),
+    riscv_outside_context_fde(EA,Beg,End),
+    riscv_outside_context_fde(Next,Beg,End).
+.decl riscv_outside_slot_boundary(EA:address)
+riscv_outside_slot_boundary(EA):-
+    riscv_outside_upper_enabled(), code(EA),
+    (riscv_outside_kill(EA,"SP"); arch.return(EA)).
+riscv_outside_slot_boundary(EA):-
+    riscv_outside_boundary_node(EA), riscv_outside_next(EA,Next), arch.jump(EA),
+    !riscv_outside_same_fde_edge(EA,Next).
+.decl riscv_outside_slot_next(EA:address,Next:address)
+riscv_outside_slot_next(EA,Next):-
+    riscv_outside_next(EA,Next), !riscv_outside_slot_boundary(EA).
+
+// Candidate-driven syntactic overapproximation. This phase never reads rd,
+// complete_base, ranges, refusals or certificates. It demands the actual
+// backward alternatives needed by a reachable biased pair, rather than
+// starting every register/slot at every whole-program root. Slot possibility
+// deliberately ignores overwrites; the complete demanded slot proof below
+// accounts for them, without a negative demand/refinement feedback cycle.
+.decl riscv_outside_possible(EA:address,Reg:register)
+.decl riscv_outside_possible_slot(EA:address,Slot:number)
+.decl riscv_outside_slot_relevant(EA:address,Slot:number)
+.decl riscv_outside_reg_query(EA:address,Reg:register)
+.decl riscv_outside_slot_query(EA:address,Slot:number)
+riscv_outside_possible(Next,Dst):-
+    riscv_outside_pair_seed(_,Lo,_,_,_),
+    arch.reg_arithmetic_operation(Lo,Dst,_,1,_),
+    instruction_get_operation(Lo,"ADDI"),
+    !arch.memory_access(_,Lo,_,_,_,_,_,_,_),
+    riscv_outside_next(Lo,Next).
+riscv_outside_possible(Next,Reg):-
+    riscv_outside_possible(EA,Reg), riscv_outside_next(EA,Next),
+    !riscv_outside_kill(EA,Reg).
+riscv_outside_possible(Next,Dst):-
+    riscv_outside_possible(EA,Src), riscv_outside_copy(EA,Dst,Src,_),
+    riscv_outside_next(EA,Next).
+riscv_outside_possible(Next,Dst):-
+    riscv_outside_possible(EA,Base), riscv_outside_add(EA,Dst,Base,_),
+    riscv_outside_next(EA,Next).
+riscv_outside_possible_slot(Next,Slot):-
+    riscv_outside_possible(EA,Reg),
+    riscv_outside_memory(EA,"STORE",Reg,"SP","NONE",_,Slot,8),
+    riscv_outside_next(EA,Next).
+riscv_outside_possible_slot(Next,Slot):-
+    riscv_outside_possible_slot(EA,Slot), riscv_outside_slot_next(EA,Next).
+riscv_outside_possible(Next,Dst):-
+    riscv_outside_possible_slot(EA,Slot),
+    riscv_outside_memory(EA,"LOAD",Dst,"SP","NONE",_,Slot,8),
+    riscv_outside_next(EA,Next).
+// Syntactic node+slot demand is independent of slot_kill/slot_query. Its
+// context walk stops at the same SP/return/inter-function boundaries as slot
+// possibility. A boundary predecessor is still recorded for a separate
+// next-side demand, but does not re-open the old frame on either side.
+riscv_outside_slot_relevant(EA,Slot):- riscv_outside_possible_slot(EA,Slot).
+riscv_outside_slot_relevant(Prev,Slot):-
+    riscv_outside_slot_relevant(EA,Slot), !riscv_outside_slot_boundary(EA),
+    riscv_outside_slot_next(Prev,EA).
+riscv_outside_slot_relevant(Prev,Slot):-
+    riscv_outside_slot_relevant(EA,Slot), !riscv_outside_slot_boundary(EA),
+    riscv_outside_next(Prev,EA), riscv_outside_slot_boundary(Prev).
+riscv_outside_slot_relevant(Next,Slot):-
+    riscv_outside_slot_relevant(EA,Slot), riscv_outside_slot_next(EA,Next).
+riscv_outside_reg_query(Lo,Reg):- riscv_outside_pair_seed(_,Lo,_,Reg,_).
+riscv_outside_reg_query(EA,Reg):-
+    riscv_outside_pair_seed(Hi,_,_,_,_),
+    riscv_outside_upper_walk(Hi,EA,Reg).
+riscv_outside_reg_query(EA,Reg):- riscv_outside_possible(EA,Reg).
+riscv_outside_reg_query(EA,Index):-
+    riscv_outside_possible(EA,Base), riscv_outside_add(EA,_,Base,Index).
+riscv_outside_reg_query(Prev,Reg):-
+    riscv_outside_reg_query(EA,Reg), riscv_outside_next(Prev,EA),
+    !riscv_outside_kill(Prev,Reg).
+// Needed scalar transfer sources are demanded at the physical definition.
+riscv_outside_reg_query(Def,Src):-
+    riscv_outside_reg_query(Next,Dst), riscv_outside_next(Def,Next),
+    riscv_outside_kill(Def,Dst),
+    riscv_outside_scalar_syntax(Def,Dst,Src,_,_).
+riscv_outside_slot_query(EA,Slot):- riscv_outside_possible_slot(EA,Slot).
+riscv_outside_slot_query(Prev,Slot):-
+    riscv_outside_slot_query(EA,Slot), riscv_outside_slot_next(Prev,EA),
+    !riscv_outside_slot_kill(Prev,Slot).
+riscv_outside_reg_query(Store,Reg):-
+    riscv_outside_slot_query(Next,Slot), riscv_outside_next(Store,Next),
+    riscv_outside_memory(Store,"STORE",Reg,"SP","NONE",_,Slot,8).
+
+// Def=0 is a root's unknown input, not a guessed integer. Every reaching
+// alternative is retained; no "best" definition at a join is chosen.
+.decl riscv_outside_rd(EA:address,Reg:register,Def:address)
+riscv_outside_rd(EA,Reg,0):-
+    riscv_outside_reg_query(EA,Reg), riscv_outside_root(EA).
+riscv_outside_rd(EA,Reg,0):-
+    riscv_outside_reg_query(EA,Reg), !riscv_outside_root_reachable(EA).
+riscv_outside_rd(EA,Reg,0):-
+    riscv_outside_reg_query(EA,Reg), riscv_outside_unknown_dispatch_input(EA).
+riscv_outside_rd(Next,Reg,EA):-
+    riscv_outside_reg_query(Next,Reg), riscv_outside_next(EA,Next),
+    riscv_outside_kill(EA,Reg).
+// Also retain a possible unknown call definition, without deleting the
+// pre-call value. Any post-call read of that value must refuse below.
+riscv_outside_rd(Next,Reg,EA):-
+    riscv_outside_reg_query(Next,Reg), riscv_outside_next(EA,Next),
+    arch.call(EA,_), arch.lra_caller_saved(Reg).
+riscv_outside_rd(Next,Reg,Def):-
+    riscv_outside_reg_query(Next,Reg), riscv_outside_next(EA,Next),
+    !riscv_outside_kill(EA,Reg), riscv_outside_rd(EA,Reg,Def).
+
+// Every proof-recognized memory operand carries its actual byte width.
+.decl riscv_outside_memory_operation(Operation:symbol)
+riscv_outside_memory_operation("LB").
+riscv_outside_memory_operation("LBU").
+riscv_outside_memory_operation("LH").
+riscv_outside_memory_operation("LHU").
+riscv_outside_memory_operation("LW").
+riscv_outside_memory_operation("LWU").
+riscv_outside_memory_operation("LD").
+riscv_outside_memory_operation("FLW").
+riscv_outside_memory_operation("FLD").
+riscv_outside_memory_operation("SB").
+riscv_outside_memory_operation("SH").
+riscv_outside_memory_operation("SW").
+riscv_outside_memory_operation("SD").
+riscv_outside_memory_operation("FSW").
+riscv_outside_memory_operation("FSD").
+riscv_outside_memory_operation("C.LW").
+riscv_outside_memory_operation("C.LWSP").
+riscv_outside_memory_operation("C.LD").
+riscv_outside_memory_operation("C.LDSP").
+riscv_outside_memory_operation("C.FLD").
+riscv_outside_memory_operation("C.FLDSP").
+riscv_outside_memory_operation("C.SW").
+riscv_outside_memory_operation("C.SWSP").
+riscv_outside_memory_operation("C.SD").
+riscv_outside_memory_operation("C.SDSP").
+riscv_outside_memory_operation("C.FSD").
+riscv_outside_memory_operation("C.FSDSP").
+
+.decl riscv_outside_memory(EA:address,Kind:symbol,Value:register,
+                          Base:reg_nullable,Index:reg_nullable,Scale:number,
+                          Disp:number,Width:unsigned)
+riscv_outside_memory(EA,Kind,Value,Base,Index,Scale,Disp,Width):-
+    riscv_outside_enabled(), code(EA),
+    instruction_get_operation(EA,Operation), riscv_outside_memory_operation(Operation),
+    arch.memory_access(Kind,EA,SrcOp,DstOp,Value,Base,Index,Scale,Disp),
+    (
+        Kind = "LOAD", MemIndex = SrcOp;
+        Kind = "STORE", MemIndex = DstOp
+    ),
+    instruction_get_op(EA,MemIndex,MemOp),
+    op_indirect_mapped(MemOp,"NONE",Base,Index,Scale,Disp,_),
+    instruction_memory_access_size(EA,MemIndex,Width), Width > 0, Width <= 8.
+
+// Full-width copies/additions are pointer transfers. Word truncation, shifts
+// of a pointer and other arithmetic remain unknown, even if later dereferenced.
+.decl riscv_outside_copy(EA:address,Dst:register,Src:register,Offset:number)
+riscv_outside_copy(EA,Dst,Src,0):-
+    riscv_outside_enabled(), arch.move_reg_reg(EA,Dst,Src).
+riscv_outside_copy(EA,Dst,Src,Offset):-
+    riscv_outside_enabled(),
+    arch.reg_arithmetic_operation(EA,Dst,Src,1,Offset),
+    instruction_get_operation(EA,Operation),
+    (Operation = "ADDI"; Operation = "C.ADDI"),
+    !arch.memory_access(_,EA,_,_,_,_,_,_,_).
+
+.decl riscv_outside_add(EA:address,Dst:register,Base:register,Index:register)
+riscv_outside_add(EA,Dst,Base,Index):-
+    riscv_outside_enabled(),
+    arch.reg_reg_arithmetic_operation(EA,Dst,Base,Index,1,0),
+    instruction_get_operation(EA,Operation),
+    (Operation = "ADD"; Operation = "C.ADD").
+riscv_outside_add(EA,Dst,Base,Index):-
+    riscv_outside_enabled(),
+    arch.reg_reg_arithmetic_operation(EA,Dst,Index,Base,1,0),
+    instruction_get_operation(EA,Operation),
+    (Operation = "ADD"; Operation = "C.ADD").
+
+// Independent bounds are instruction semantics, never a value guessed from
+// a successful memory access. This initial candidate does not model parser
+// protocols or arbitrary branch-derived integer ranges.
+.decl riscv_outside_scalar_seed(Def:address,Reg:register,Low:number,High:number)
+.decl riscv_outside_value_def(Def:address,Reg:register)
+riscv_outside_value_def(Def,Reg):- riscv_outside_rd(_,Reg,Def), Def != 0.
+riscv_outside_scalar_seed(EA,Reg,Imm,Imm):-
+    riscv_outside_value_def(EA,Reg), arch.move_reg_imm(EA,Reg,Imm,_),
+    Imm >= -1048576, Imm <= 1048576.
+riscv_outside_scalar_seed(EA,Reg,0,Mask):-
+    riscv_outside_value_def(EA,Reg), instruction_get_operation(EA,Operation),
+    (Operation = "ANDI"; Operation = "C.ANDI"),
+    op_immediate_and_reg(EA,Operation,_,_,Mask), Mask >= 0, Mask <= 1048576,
+    instruction_get_dest_op(EA,_,Op), op_regdirect_contains_reg(Op,Reg).
+riscv_outside_scalar_seed(EA,Reg,0,1):-
+    riscv_outside_value_def(EA,Reg), instruction_get_operation(EA,Operation),
+    (Operation = "SLT"; Operation = "SLTU"; Operation = "SLTI";
+     Operation = "SLTIU"; Operation = "SEQZ"; Operation = "SNEZ"),
+    instruction_get_dest_op(EA,_,Op), op_regdirect_contains_reg(Op,Reg).
+riscv_outside_scalar_seed(EA,Reg,0,Max):-
+    riscv_outside_value_def(EA,Reg), riscv_outside_memory(EA,"LOAD",Reg,_,_,_,_,Width),
+    instruction_get_operation(EA,Operation),
+    (Operation = "LBU"; Operation = "LHU"),
+    Max = 2^(as(Width,number)*8)-1, Max <= 1048576.
+
+.decl riscv_outside_scalar_transfer(EA:address,Dst:register,Src:register,
+                                  Scale:number,Offset:number)
+.decl riscv_outside_scalar_syntax(EA:address,Dst:register,Src:register,
+                                Scale:number,Offset:number)
+riscv_outside_scalar_syntax(EA,Dst,Src,1,Offset):-
+    riscv_outside_copy(EA,Dst,Src,Offset).
+riscv_outside_scalar_syntax(EA,Dst,Src,Scale,Offset):-
+    riscv_outside_enabled(),
+    arch.reg_arithmetic_operation(EA,Dst,Src,Scale,Offset),
+    instruction_get_operation(EA,Operation),
+    (Operation = "SLLI"; Operation = "C.SLLI"),
+    Scale > 0, Scale <= 4096.
+riscv_outside_scalar_transfer(EA,Dst,Src,Scale,Offset):-
+    riscv_outside_value_def(EA,Dst),
+    riscv_outside_scalar_syntax(EA,Dst,Src,Scale,Offset).
+
+.decl riscv_outside_scalar_parent(Def:address,Reg:register,
+                                Parent:address,ParentReg:register)
+riscv_outside_scalar_parent(EA,Dst,Parent,Src):-
+    riscv_outside_scalar_transfer(EA,Dst,Src,_,_),
+    !riscv_outside_scalar_seed(EA,Dst,_,_),
+    riscv_outside_rd(EA,Src,Parent).
+.decl riscv_outside_scalar_ancestor(Def:address,Reg:register,
+                                  Parent:address,ParentReg:register)
+riscv_outside_scalar_ancestor(EA,Reg,Parent,ParentReg):-
+    riscv_outside_scalar_parent(EA,Reg,Parent,ParentReg).
+riscv_outside_scalar_ancestor(EA,Reg,Parent,ParentReg):-
+    riscv_outside_scalar_parent(EA,Reg,Middle,MiddleReg),
+    riscv_outside_scalar_ancestor(Middle,MiddleReg,Parent,ParentReg).
+.decl riscv_outside_scalar_cycle(Def:address,Reg:register)
+riscv_outside_scalar_cycle(EA,Reg):-
+    riscv_outside_scalar_ancestor(EA,Reg,EA,Reg).
+
+.decl riscv_outside_scalar_range(Def:address,Reg:register,Low:number,High:number)
+riscv_outside_scalar_range(EA,Reg,Low,High):-
+    riscv_outside_scalar_seed(EA,Reg,Low,High).
+riscv_outside_scalar_range(EA,Dst,NewLow,NewHigh):-
+    riscv_outside_scalar_transfer(EA,Dst,Src,Scale,Offset),
+    riscv_outside_scalar_parent(EA,Dst,Parent,Src),
+    !riscv_outside_scalar_cycle(EA,Dst),
+    riscv_outside_scalar_range(Parent,Src,Low,High),
+    NewLow = Low*Scale+Offset, NewHigh = High*Scale+Offset,
+    NewLow >= -1048576, NewHigh <= 1048576.
+.decl riscv_outside_scalar_unknown(Def:address,Reg:register)
+riscv_outside_scalar_unknown(EA,Reg):-
+    riscv_outside_rd(_,Reg,EA), !riscv_outside_scalar_range(EA,Reg,_,_).
+riscv_outside_scalar_unknown(EA,Reg):- riscv_outside_scalar_cycle(EA,Reg).
+riscv_outside_scalar_unknown(EA,Reg):-
+    riscv_outside_scalar_parent(EA,Reg,Parent,ParentReg),
+    riscv_outside_scalar_unknown(Parent,ParentReg).
+riscv_outside_scalar_unknown(EA,Dst):-
+    riscv_outside_scalar_transfer(EA,Dst,Src,Scale,Offset),
+    riscv_outside_scalar_parent(EA,Dst,Parent,Src),
+    riscv_outside_scalar_range(Parent,Src,Low,High),
+    (Low*Scale+Offset < -1048576; High*Scale+Offset > 1048576).
+
+// A spilled pointer is tracked forward independently of the base register.
+// The initial candidate permits only exact full-pointer slots based on SP.
+// Calls/stack adjustments/unknown aliases while a slot is live refuse it.
+.decl riscv_outside_slot_rd(EA:address,Slot:number,Store:address)
+.decl riscv_outside_slot_kill(EA:address,Slot:number)
+riscv_outside_slot_rd(EA,Slot,0):-
+    riscv_outside_slot_query(EA,Slot), riscv_outside_root(EA).
+riscv_outside_slot_rd(EA,Slot,0):-
+    riscv_outside_slot_query(EA,Slot), !riscv_outside_root_reachable(EA).
+riscv_outside_slot_rd(EA,Slot,0):-
+    riscv_outside_slot_query(EA,Slot), riscv_outside_unknown_dispatch_input(EA).
+// A separate next-side demand cannot carry an old frame's known store past
+// the truncated edge. Syntactic relevance avoids a query/kill negation cycle;
+// the boundary node still has its demanded pre-kill state and refusal.
+riscv_outside_slot_kill(EA,Slot):-
+    riscv_outside_slot_relevant(EA,Slot), riscv_outside_slot_boundary(EA).
+riscv_outside_slot_kill(EA,Slot):-
+    riscv_outside_slot_relevant(EA,Slot),
+    riscv_outside_memory(EA,"STORE",_,"SP","NONE",_,Other,Width),
+    Other < Slot+8, Slot < Other+as(Width,number).
+riscv_outside_slot_kill(EA,Slot):-
+    riscv_outside_slot_relevant(EA,Slot), riscv_outside_kill(EA,"SP").
+riscv_outside_slot_rd(Next,Slot,EA):-
+    riscv_outside_slot_query(Next,Slot), riscv_outside_next(EA,Next),
+    riscv_outside_memory(EA,"STORE",_,"SP","NONE",_,Slot,8).
+riscv_outside_slot_rd(Next,Slot,0):-
+    riscv_outside_slot_query(Next,Slot), riscv_outside_next(EA,Next),
+    riscv_outside_slot_kill(EA,Slot),
+    !riscv_outside_memory(EA,"STORE",_,"SP","NONE",_,Slot,8).
+riscv_outside_slot_rd(Next,Slot,Store):-
+    riscv_outside_slot_query(Next,Slot), riscv_outside_next(EA,Next),
+    !riscv_outside_slot_kill(EA,Slot), riscv_outside_slot_rd(EA,Slot,Store).
+
+.decl riscv_outside_pointer_def(Hi:address,Lo:address,Def:address,Reg:register)
+.decl riscv_outside_pointer_parent(Hi:address,Lo:address,Def:address,Reg:register,
+                                  Parent:address,ParentReg:register,Offset:number)
+.decl riscv_outside_pointer_index(Hi:address,Lo:address,Def:address,Reg:register,
+                                 Parent:address,ParentReg:register,Index:register)
+riscv_outside_pointer_def(Hi,Lo,Lo,Reg):-
+    riscv_outside_section_candidate(Hi,Lo,_,_,Target),
+    riscv_outside_complete_base(Lo,Reg,Target).
+// At a real join, another independently proved ADDI definition of the exact
+// same completed base is a known alternative. Unknown/numeric alternatives
+// are retained by rd and refused below. This does not follow calls or infer
+// a callee/string protocol, nor seed unrelated functions as pointer roots.
+riscv_outside_pointer_def(Hi,Lo,Other,Reg):-
+    riscv_outside_section_candidate(Hi,Lo,_,_,Target),
+    riscv_outside_pointer_at(Hi,Lo,EA,Reg,_),
+    riscv_outside_rd(EA,Reg,Other),
+    riscv_outside_complete_base(Other,Reg,Target).
+riscv_outside_pointer_parent(Hi,Lo,EA,Dst,Parent,Src,Offset):-
+    riscv_outside_pointer_def(Hi,Lo,Parent,Src), riscv_outside_rd(EA,Src,Parent),
+    riscv_outside_copy(EA,Dst,Src,Offset).
+riscv_outside_pointer_index(Hi,Lo,EA,Dst,Parent,Base,Index):-
+    riscv_outside_pointer_def(Hi,Lo,Parent,Base), riscv_outside_rd(EA,Base,Parent),
+    riscv_outside_add(EA,Dst,Base,Index).
+riscv_outside_pointer_parent(Hi,Lo,Load,Dst,Parent,Src,0):-
+    riscv_outside_pointer_def(Hi,Lo,Parent,Src), riscv_outside_rd(Store,Src,Parent),
+    riscv_outside_memory(Store,"STORE",Src,"SP","NONE",_,Slot,8),
+    riscv_outside_slot_rd(Load,Slot,Store),
+    riscv_outside_memory(Load,"LOAD",Dst,"SP","NONE",_,Slot,8).
+riscv_outside_pointer_def(Hi,Lo,EA,Reg):-
+    riscv_outside_pointer_parent(Hi,Lo,EA,Reg,_,_,_).
+riscv_outside_pointer_def(Hi,Lo,EA,Reg):-
+    riscv_outside_pointer_index(Hi,Lo,EA,Reg,_,_,_).
+
+.decl riscv_outside_pointer_ancestor(Hi:address,Lo:address,Def:address,Reg:register,
+                                    Parent:address,ParentReg:register)
+riscv_outside_pointer_ancestor(Hi,Lo,EA,Reg,Parent,ParentReg):-
+    riscv_outside_pointer_parent(Hi,Lo,EA,Reg,Parent,ParentReg,_);
+    riscv_outside_pointer_index(Hi,Lo,EA,Reg,Parent,ParentReg,_).
+riscv_outside_pointer_ancestor(Hi,Lo,EA,Reg,Parent,ParentReg):-
+    riscv_outside_pointer_ancestor(Hi,Lo,EA,Reg,Middle,MiddleReg),
+    riscv_outside_pointer_ancestor(Hi,Lo,Middle,MiddleReg,Parent,ParentReg).
+.decl riscv_outside_pointer_cycle(Hi:address,Lo:address,Def:address,Reg:register)
+riscv_outside_pointer_cycle(Hi,Lo,EA,Reg):-
+    riscv_outside_pointer_ancestor(Hi,Lo,EA,Reg,EA,Reg).
+
+.decl riscv_outside_pointer_range(Hi:address,Lo:address,Def:address,Reg:register,
+                                 Low:number,High:number)
+riscv_outside_pointer_range(Hi,Lo,Def,Reg,0,0):-
+    riscv_outside_section_candidate(Hi,Lo,_,_,Target),
+    riscv_outside_pointer_def(Hi,Lo,Def,Reg),
+    riscv_outside_complete_base(Def,Reg,Target).
+riscv_outside_pointer_range(Hi,Lo,EA,Reg,NewLow,NewHigh):-
+    riscv_outside_pointer_parent(Hi,Lo,EA,Reg,Parent,ParentReg,Offset),
+    !riscv_outside_pointer_cycle(Hi,Lo,EA,Reg),
+    riscv_outside_pointer_range(Hi,Lo,Parent,ParentReg,Low,High),
+    NewLow = Low+Offset, NewHigh = High+Offset,
+    NewLow >= -1048576, NewHigh <= 1048576.
+riscv_outside_pointer_range(Hi,Lo,EA,Reg,NewLow,NewHigh):-
+    riscv_outside_pointer_index(Hi,Lo,EA,Reg,Parent,ParentReg,Index),
+    !riscv_outside_pointer_cycle(Hi,Lo,EA,Reg),
+    riscv_outside_pointer_range(Hi,Lo,Parent,ParentReg,Low,High),
+    riscv_outside_rd(EA,Index,IndexDef),
+    !riscv_outside_scalar_unknown(IndexDef,Index),
+    riscv_outside_scalar_range(IndexDef,Index,IndexLow,IndexHigh),
+    NewLow = Low+IndexLow, NewHigh = High+IndexHigh,
+    NewLow >= -1048576, NewHigh <= 1048576.
+
+.decl riscv_outside_pointer_at(Hi:address,Lo:address,EA:address,
+                              Reg:register,Def:address)
+riscv_outside_pointer_at(Hi,Lo,EA,Reg,Def):-
+    riscv_outside_pointer_def(Hi,Lo,Def,Reg), riscv_outside_rd(EA,Reg,Def).
+
+// Caller-saved values are not presumed killed by a call. Observe actual
+// post-call reads before the first physical write, including read-before-write.
+// This is intraprocedural; no local-callee register footprint is inferred.
+.decl riscv_outside_call_value(Call:address,Reg:register)
+riscv_outside_call_value(Call,Reg):-
+    riscv_outside_possible(Call,Reg), arch.call(Call,_),
+    arch.lra_caller_saved(Reg), !riscv_outside_kill(Call,Reg).
+riscv_outside_call_value(Call,Reg):-
+    riscv_outside_pair_seed(Hi,_,_,_,_), riscv_outside_upper_walk(Hi,Call,Reg),
+    arch.call(Call,_), arch.lra_caller_saved(Reg),
+    !riscv_outside_kill(Call,Reg).
+.decl riscv_outside_call_read(Call:address,Reg:register)
+riscv_outside_call_read(Call,Reg):-
+    riscv_outside_call_value(Call,Reg), riscv_outside_next(Call,Next),
+    riscv_outside_future_read(Next,Reg).
+
+// Only the completed biased OUTSIDE value may be
+// incidental dead contents of an argument register. Unknown control paths
+// are not a deadness proof, and every post-call caller-saved explicit read
+// still refuses. This rule cannot admit an in-section or offset pointer.
+.decl riscv_outside_future_read(EA:address,Reg:register)
+riscv_outside_future_read(EA,Reg):-
+    riscv_outside_reg_query(EA,Reg), basic_reg_def_use.used_explicit(EA,Reg,_).
+riscv_outside_future_read(EA,Reg):-
+    riscv_outside_reg_query(EA,Reg), riscv_outside_next(EA,Next),
+    !riscv_outside_kill(EA,Reg), riscv_outside_future_read(Next,Reg).
+.decl riscv_outside_future_unknown(EA:address,Reg:register)
+riscv_outside_future_unknown(EA,Reg):-
+    riscv_outside_reg_query(EA,Reg),
+    (
+        riscv_outside_bad_successor(EA,_);
+        arch.jump(EA), !arch.return(EA),
+            !riscv_outside_direct_jump(EA,_), !riscv_outside_table_target(EA,_);
+        !riscv_outside_next(EA,_), !arch.return(EA),
+            !riscv_outside_c_noreturn_plt_call(EA);
+        instruction_get_operation(EA,Operation),
+            (Operation = "ECALL"; Operation = "EBREAK"; Operation = "C.EBREAK")
+    ).
+riscv_outside_future_unknown(EA,Reg):-
+    riscv_outside_reg_query(EA,Reg), riscv_outside_next(EA,Next),
+    !riscv_outside_kill(EA,Reg), riscv_outside_future_unknown(Next,Reg).
+.decl riscv_outside_dead_range_nonzero(Hi:address,Lo:address,Def:address,Reg:register)
+riscv_outside_dead_range_nonzero(Hi,Lo,Def,Reg):-
+    riscv_outside_pointer_range(Hi,Lo,Def,Reg,Low,High),
+    (Low != 0; High != 0).
+.decl riscv_outside_dead_completed_call(Hi:address,Lo:address,EA:address,
+                                       Reg:register,Def:address)
+riscv_outside_dead_completed_call(Hi,Lo,EA,Reg,Def):-
+    riscv_outside_pointer_at(Hi,Lo,EA,Reg,Def),
+    riscv_outside_pointer_range(Hi,Lo,Def,Reg,0,0),
+    !riscv_outside_dead_range_nonzero(Hi,Lo,Def,Reg),
+    riscv_outside_section_candidate(Hi,Lo,_,_,_),
+    arch.call(EA,_), arch.lra_argument_register(Reg), arch.lra_caller_saved(Reg),
+    !basic_reg_def_use.used_explicit(EA,Reg,_),
+    !riscv_outside_future_read(EA,Reg), !riscv_outside_future_unknown(EA,Reg).
+
+.decl riscv_outside_callee_saved(Reg:register)
+riscv_outside_callee_saved("S0"). riscv_outside_callee_saved("S1").
+riscv_outside_callee_saved("S2"). riscv_outside_callee_saved("S3").
+riscv_outside_callee_saved("S4"). riscv_outside_callee_saved("S5").
+riscv_outside_callee_saved("S6"). riscv_outside_callee_saved("S7").
+riscv_outside_callee_saved("S8"). riscv_outside_callee_saved("S9").
+riscv_outside_callee_saved("S10"). riscv_outside_callee_saved("S11").
+.decl riscv_outside_preserved_call(EA:address,Reg:register)
+riscv_outside_preserved_call(EA,Reg):-
+    arch.call(EA,_), riscv_outside_callee_saved(Reg),
+    !basic_reg_def_use.used_explicit(EA,Reg,_), !riscv_outside_kill(EA,Reg).
+
+.decl riscv_outside_section_refusal(Hi:address,Lo:address,EA:address,Reason:symbol)
+.output riscv_outside_section_refusal
+.decl riscv_outside_pair_extent(Hi:address,Lo:address,Index:operand_index)
+riscv_outside_pair_extent(Hi,Lo,Index):-
+    riscv_outside_section_candidate(Hi,Lo,Index,_,_),
+    instruction_immediate_offset(Hi,1,_,HiSize), HiSize > 0,
+    instruction_immediate_offset(Lo,Index,_,LoSize), LoSize > 0.
+riscv_outside_section_refusal(Hi,Lo,Lo,"missing complete HI/LO immediate extents"):-
+    riscv_outside_section_candidate(Hi,Lo,Index,_,_),
+    !riscv_outside_pair_extent(Hi,Lo,Index).
+riscv_outside_section_refusal(Hi,Lo,EA,"unproved affine value"):-
+    riscv_outside_pointer_def(Hi,Lo,EA,Reg),
+    !riscv_outside_pointer_range(Hi,Lo,EA,Reg,_,_).
+riscv_outside_section_refusal(Hi,Lo,Lo,"lower consumer has another reaching definition"):-
+    riscv_outside_lower_ambiguous(Hi,Lo).
+riscv_outside_section_refusal(Hi,Lo,Lo,"direct memory lower is outside allocated data"):-
+    riscv_outside_section_candidate(Hi,Lo,_,_,_),
+    arch.memory_access(_,Lo,_,_,_,_,_,_,_).
+riscv_outside_section_refusal(Hi,Lo,OtherLo,"upper has multiple lower consumers"):-
+    riscv_outside_section_candidate(Hi,Lo,_,_,_),
+    riscv_outside_section_candidate(Hi,OtherLo,_,_,_), Lo != OtherLo.
+riscv_outside_section_refusal(Hi,Lo,EA,"unmatched raw HI use"):-
+    riscv_outside_high_at(Hi,Lo,EA,Reg),
+    basic_reg_def_use.used(EA,Reg,_), EA != Lo.
+riscv_outside_section_refusal(Hi,Lo,EA,"raw HI passed or returned"):-
+    riscv_outside_high_at(Hi,Lo,EA,Reg),
+    (arch.call(EA,_), arch.lra_argument_register(Reg);
+     arch.return(EA), arch.lra_return_register(Reg)).
+riscv_outside_section_refusal(Hi,Lo,Call,"caller-saved raw HI read after call"):-
+    riscv_outside_high_at(Hi,Lo,Call,Reg), riscv_outside_call_read(Call,Reg).
+riscv_outside_section_refusal(Hi,Lo,Call,"caller-saved pointer read after call"):-
+    riscv_outside_pointer_at(Hi,Lo,Call,Reg,_), riscv_outside_call_read(Call,Reg).
+riscv_outside_section_refusal(Hi,Lo,EA,"non-code successor with raw HI"):-
+    riscv_outside_high_at(Hi,Lo,EA,_), riscv_outside_bad_successor(EA,_).
+riscv_outside_section_refusal(Hi,Lo,EA,"non-code successor with pointer"):-
+    riscv_outside_pointer_at(Hi,Lo,EA,_,_), riscv_outside_bad_successor(EA,_).
+riscv_outside_section_refusal(Hi,Lo,EA,"unproved live HI control path"):-
+    riscv_outside_high_at(Hi,Lo,EA,Reg),
+    (arch.call(EA,_), !riscv_outside_direct_call(EA,_),
+        !riscv_outside_preserved_call(EA,Reg);
+     arch.jump(EA), !arch.return(EA), !riscv_outside_direct_jump(EA,_),
+        !riscv_outside_table_target(EA,_);
+     !riscv_outside_next(EA,_), !arch.return(EA),
+            !riscv_outside_c_noreturn_plt_call(EA)).
+riscv_outside_section_refusal(Hi,Lo,EA,"system instruction with live raw HI"):-
+    riscv_outside_high_at(Hi,Lo,EA,_),
+    instruction_get_operation(EA,Operation),
+    (Operation = "ECALL"; Operation = "EBREAK"; Operation = "C.EBREAK").
+riscv_outside_section_refusal(Hi,Lo,OtherLo,"upper has different completed addresses"):-
+    riscv_outside_section_candidate(Hi,Lo,_,_,Target),
+    riscv_outside_section_candidate(Hi,OtherLo,_,_,OtherTarget),
+    Target != OtherTarget.
+riscv_outside_section_refusal(Hi,Lo,EA,"unbounded index alternative"):-
+    riscv_outside_pointer_index(Hi,Lo,EA,_,_,_,Index),
+    riscv_outside_rd(EA,Index,IndexDef),
+    riscv_outside_scalar_unknown(IndexDef,Index).
+riscv_outside_section_refusal(Hi,Lo,EA,"pointer derivation cycle"):-
+    riscv_outside_pointer_cycle(Hi,Lo,EA,_).
+riscv_outside_section_refusal(Hi,Lo,EA,"affine alternative exceeds proof bounds"):-
+    riscv_outside_pointer_parent(Hi,Lo,EA,_,Parent,ParentReg,Offset),
+    riscv_outside_pointer_range(Hi,Lo,Parent,ParentReg,Low,High),
+    (Low+Offset < -1048576; High+Offset > 1048576).
+riscv_outside_section_refusal(Hi,Lo,EA,"affine alternative exceeds proof bounds"):-
+    riscv_outside_pointer_index(Hi,Lo,EA,_,Parent,ParentReg,Index),
+    riscv_outside_pointer_range(Hi,Lo,Parent,ParentReg,Low,High),
+    riscv_outside_rd(EA,Index,IndexDef),
+    riscv_outside_scalar_range(IndexDef,Index,IndexLow,IndexHigh),
+    (Low+IndexLow < -1048576; High+IndexHigh > 1048576).
+riscv_outside_section_refusal(Hi,Lo,EA,"pointer assigned to reserved register"):-
+    riscv_outside_pointer_def(Hi,Lo,EA,Reg),
+    (arch.stack_pointer(Reg); Reg = "GP"; Reg = "TP"; Reg = "ZERO").
+riscv_outside_section_refusal(Hi,Lo,EA,"pointer passed to call"):-
+    riscv_outside_pointer_at(Hi,Lo,EA,Reg,Def),
+    arch.call(EA,_), arch.lra_argument_register(Reg),
+    !riscv_outside_dead_completed_call(Hi,Lo,EA,Reg,Def).
+riscv_outside_section_refusal(Hi,Lo,EA,"pointer returned to caller"):-
+    riscv_outside_pointer_at(Hi,Lo,EA,Reg,_),
+    arch.return(EA), arch.lra_return_register(Reg).
+riscv_outside_section_refusal(Hi,Lo,EA,"unresolved branch"):-
+    riscv_outside_pointer_at(Hi,Lo,EA,_,_),
+    arch.jump(EA), !arch.return(EA), !riscv_outside_direct_jump(EA,_),
+    !riscv_outside_table_target(EA,_).
+riscv_outside_section_refusal(Hi,Lo,EA,"unresolved call"):-
+    riscv_outside_pointer_at(Hi,Lo,EA,Reg,Def),
+    arch.call(EA,_), !riscv_outside_direct_call(EA,_),
+    !riscv_outside_preserved_call(EA,Reg),
+    !riscv_outside_dead_completed_call(Hi,Lo,EA,Reg,Def).
+riscv_outside_section_refusal(Hi,Lo,EA,"unmodeled system instruction"):-
+    riscv_outside_pointer_at(Hi,Lo,EA,_,_),
+    instruction_get_operation(EA,Operation),
+    (Operation = "ECALL"; Operation = "EBREAK"; Operation = "C.EBREAK").
+riscv_outside_section_refusal(Hi,Lo,EA,"unfinished live CFG path"):-
+    riscv_outside_pointer_at(Hi,Lo,EA,_,_),
+    !riscv_outside_next(EA,_), !arch.return(EA),
+            !riscv_outside_c_noreturn_plt_call(EA).
+
+// Every non-address use must have a specifically recognized transfer. This
+// includes read-before-write and aliases whose original register was killed.
+.decl riscv_outside_accepted_use(EA:address,Reg:register)
+riscv_outside_accepted_use(EA,Reg):- riscv_outside_copy(EA,_,Reg,_).
+riscv_outside_accepted_use(EA,Reg):- riscv_outside_add(EA,_,Reg,_).
+riscv_outside_accepted_use(EA,Reg):-
+    riscv_outside_memory(EA,_,_,Base,"NONE",_,_,_),
+    reg_nonnull(Base,Reg).
+riscv_outside_accepted_use(EA,Reg):-
+    riscv_outside_memory(EA,"STORE",Reg,"SP","NONE",_,_,8).
+riscv_outside_section_refusal(Hi,Lo,EA,"unsupported live-pointer use"):-
+    riscv_outside_pointer_at(Hi,Lo,EA,Reg,_),
+    basic_reg_def_use.used(EA,Reg,_),
+    !riscv_outside_accepted_use(EA,Reg).
+riscv_outside_section_refusal(Hi,Lo,EA,"conflicting reaching pointer definition"):-
+    riscv_outside_pointer_at(Hi,Lo,EA,Reg,_),
+    basic_reg_def_use.used(EA,Reg,_),
+    riscv_outside_rd(EA,Reg,Other),
+    !riscv_outside_pointer_def(Hi,Lo,Other,Reg).
+// Equal-value definitions at a join form a dependency group. Every member
+// must satisfy its own provisional proof, including raw-HI use refusals.
+// Refusal propagation is positive recursion, entirely before emission.
+.decl riscv_outside_base_dependency(Hi:address,Lo:address,
+                                   OtherHi:address,OtherLo:address)
+.output riscv_outside_base_dependency
+riscv_outside_base_dependency(Hi,Lo,OtherHi,OtherLo):-
+    riscv_outside_section_candidate(Hi,Lo,_,_,Target),
+    riscv_outside_pointer_def(Hi,Lo,OtherLo,Reg),
+    riscv_outside_complete_base(OtherLo,Reg,Target),
+    riscv_outside_section_candidate(OtherHi,OtherLo,_,_,Target),
+    (Hi != OtherHi; Lo != OtherLo).
+riscv_outside_section_refusal(Hi,Lo,EA,"equal-base dependency refused"):-
+    riscv_outside_base_dependency(Hi,Lo,OtherHi,OtherLo),
+    riscv_outside_section_refusal(OtherHi,OtherLo,EA,_).
+// Even a recognized copy/add cannot hide a second unrecognized memory
+// operand. Missing widths and unsupported atomic/vector accesses refuse.
+riscv_outside_section_refusal(Hi,Lo,EA,"unproved memory operand or width"):-
+    riscv_outside_pointer_at(Hi,Lo,EA,Reg,_),
+    instruction_get_op(EA,Index,Op),
+    op_indirect_mapped(Op,_,Base,IndexReg,_,_,_),
+    (Base = Reg; IndexReg = Reg),
+    !riscv_outside_memory(EA,_,_,Base,IndexReg,_,_,_).
+riscv_outside_section_refusal(Hi,Lo,EA,"stored pointer escapes exact stack slot"):-
+    riscv_outside_pointer_at(Hi,Lo,EA,Reg,_),
+    riscv_outside_memory(EA,"STORE",Reg,Base,Index,_,_,Width),
+    (Base != "SP"; Index != "NONE"; Width != 8).
+riscv_outside_section_refusal(Hi,Lo,EA,"live stack slot at call, return or SP change"):-
+    riscv_outside_slot_rd(EA,Slot,Store),
+    riscv_outside_memory(Store,"STORE",Reg,"SP","NONE",_,Slot,8),
+    riscv_outside_pointer_at(Hi,Lo,Store,Reg,_),
+    (arch.call(EA,_); arch.return(EA); riscv_outside_kill(EA,"SP")).
+riscv_outside_section_refusal(Hi,Lo,EA,"live stack slot at frame boundary"):-
+    riscv_outside_slot_rd(EA,Slot,Store),
+    riscv_outside_pointer_store(Hi,Lo,Store,Slot),
+    riscv_outside_slot_boundary(EA).
+riscv_outside_section_refusal(Hi,Lo,EA,"unproved memory operand with live stack slot"):-
+    riscv_outside_slot_rd(EA,Slot,Store),
+    riscv_outside_memory(Store,"STORE",Reg,"SP","NONE",_,Slot,8),
+    riscv_outside_pointer_at(Hi,Lo,Store,Reg,_),
+    instruction_get_op(EA,_,Op), op_indirect_mapped(Op,_,Base,Index,_,_,_),
+    !riscv_outside_memory(EA,_,_,Base,Index,_,_,_).
+riscv_outside_section_refusal(Hi,Lo,EA,"system instruction with live stack slot"):-
+    riscv_outside_slot_rd(EA,Slot,Store),
+    riscv_outside_memory(Store,"STORE",Reg,"SP","NONE",_,Slot,8),
+    riscv_outside_pointer_at(Hi,Lo,Store,Reg,_),
+    instruction_get_operation(EA,Operation),
+    (Operation = "ECALL"; Operation = "EBREAK"; Operation = "C.EBREAK").
+riscv_outside_section_refusal(Hi,Lo,EA,"unfinished stack-slot CFG path"):-
+    riscv_outside_slot_rd(EA,Slot,Store),
+    riscv_outside_memory(Store,"STORE",Reg,"SP","NONE",_,Slot,8),
+    riscv_outside_pointer_at(Hi,Lo,Store,Reg,_),
+    (
+        arch.jump(EA), !arch.return(EA), !riscv_outside_direct_jump(EA,_),
+            !riscv_outside_table_target(EA,_);
+        !riscv_outside_next(EA,_), !arch.return(EA),
+            !riscv_outside_c_noreturn_plt_call(EA);
+        riscv_outside_bad_successor(EA,_)
+    ).
+riscv_outside_section_refusal(Hi,Lo,EA,"partial or non-GPR stack-slot read"):-
+    riscv_outside_slot_rd(EA,Slot,Store),
+    riscv_outside_memory(Store,"STORE",Reg,"SP","NONE",_,Slot,8),
+    riscv_outside_pointer_at(Hi,Lo,Store,Reg,_),
+    riscv_outside_memory(EA,"LOAD",Dst,"SP","NONE",_,Other,Width),
+    Other < Slot+8, Slot < Other+as(Width,number),
+    (Other != Slot; Width != 8; !track_register(Dst)).
+riscv_outside_section_refusal(Hi,Lo,EA,"conflicting or unknown reaching stack store"):-
+    riscv_outside_slot_rd(EA,Slot,Store),
+    riscv_outside_memory(Store,"STORE",Reg,"SP","NONE",_,Slot,8),
+    riscv_outside_pointer_at(Hi,Lo,Store,Reg,_),
+    riscv_outside_memory(EA,"LOAD",_,"SP","NONE",_,Slot,8),
+    riscv_outside_slot_rd(EA,Slot,Other),
+    !riscv_outside_pointer_store(Hi,Lo,Other,Slot).
+
+.decl riscv_outside_pointer_store(Hi:address,Lo:address,Store:address,Slot:number)
+riscv_outside_pointer_store(Hi,Lo,Store,Slot):-
+    riscv_outside_memory(Store,"STORE",Reg,"SP","NONE",_,Slot,8),
+    riscv_outside_pointer_at(Hi,Lo,Store,Reg,_).
+riscv_outside_section_refusal(Hi,Lo,EA,"unproved aliasing read from live stack slot"):-
+    riscv_outside_slot_rd(EA,Slot,Store),
+    riscv_outside_memory(Store,"STORE",Reg,"SP","NONE",_,Slot,8),
+    riscv_outside_pointer_at(Hi,Lo,Store,Reg,_),
+    riscv_outside_memory(EA,"LOAD",_,Base,Index,_,_,_),
+    (Base != "SP"; Index != "NONE"),
+    !riscv_outside_access(Hi,Lo,EA,_,_).
+riscv_outside_section_refusal(Hi,Lo,EA,"unproved aliasing write to live stack slot"):-
+    riscv_outside_slot_rd(EA,Slot,Store),
+    riscv_outside_memory(Store,"STORE",Reg,"SP","NONE",_,Slot,8),
+    riscv_outside_pointer_at(Hi,Lo,Store,Reg,_),
+    riscv_outside_memory(EA,"STORE",_,Base,Index,_,Other,Width),
+    (Base != "SP"; Index != "NONE";
+     Other < Slot+8, Slot < Other+as(Width,number),
+     (Other != Slot; Width != 8)).
+
+.decl riscv_outside_access(Hi:address,Lo:address,EA:address,
+                          Low:number,HighExclusive:number)
+.output riscv_outside_access
+riscv_outside_access(Hi,Lo,EA,LowAddress,EndAddress):-
+    riscv_outside_pointer_at(Hi,Lo,EA,Base,Def),
+    riscv_outside_memory(EA,_,_,Base,"NONE",_,Disp,Width),
+    riscv_outside_section_candidate(Hi,Lo,_,_,Target),
+    riscv_outside_pointer_range(Hi,Lo,Def,Base,Low,High),
+    LowAddress = as(Target,number)+Low+Disp,
+    EndAddress = as(Target,number)+High+Disp+as(Width,number).
+
+.decl riscv_outside_data_section(Hi:address,Lo:address,Name:symbol,
+                                Beg:address,End:address)
+riscv_outside_data_section(Hi,Lo,Name,Beg,End):-
+    riscv_outside_access(Hi,Lo,_,Low,High),
+    regular_data_section(Name), bss_section(Name), !tls_section(Name),
+    loaded_section(Beg,End,Name),
+    Low >= as(Beg,number), High <= as(End,number).
+riscv_outside_section_refusal(Hi,Lo,EA,"access outside proposed data section"):-
+    riscv_outside_data_section(Hi,Lo,_,Beg,End),
+    riscv_outside_access(Hi,Lo,EA,Low,High),
+    (Low < as(Beg,number); High > as(End,number)).
+riscv_outside_section_refusal(Hi,Lo,Lo,"no bounded data access"):-
+    riscv_outside_section_candidate(Hi,Lo,_,_,_),
+    !riscv_outside_data_section(Hi,Lo,_,_,_).
+riscv_outside_section_refusal(Hi,Lo,Lo,"ambiguous data sections"):-
+    riscv_outside_data_section(Hi,Lo,Name1,Beg1,End1),
+    riscv_outside_data_section(Hi,Lo,Name2,Beg2,End2),
+    (Name1 != Name2; Beg1 != Beg2; End1 != End2).
+riscv_outside_section_refusal(Hi,Lo,EA,"initialized data anchor construction is unsupported"):-
+    riscv_outside_access(Hi,Lo,EA,Low,High),
+    regular_data_section(Name), !bss_section(Name), loaded_section(Beg,End,Name),
+    Low >= as(Beg,number), High <= as(End,number).
+
+.decl riscv_outside_data_interval(Hi:address,Lo:address,
+                                 Beg:address,End:address)
+riscv_outside_data_interval(Hi,Lo,Beg,End):-
+    riscv_outside_data_section(Hi,Lo,_,SectionBeg,SectionEnd),
+    byte_interval(Beg,End), Beg >= SectionBeg, End <= SectionEnd,
+    riscv_outside_access(Hi,Lo,_,Low,High),
+    Low >= as(Beg,number), High <= as(End,number).
+riscv_outside_section_refusal(Hi,Lo,Lo,"no single data byte interval"):-
+    riscv_outside_section_candidate(Hi,Lo,_,_,_),
+    !riscv_outside_data_interval(Hi,Lo,_,_).
+riscv_outside_section_refusal(Hi,Lo,EA,"access outside proposed data byte interval"):-
+    riscv_outside_data_interval(Hi,Lo,Beg,End),
+    riscv_outside_access(Hi,Lo,EA,Low,High),
+    (Low < as(Beg,number); High > as(End,number)).
+riscv_outside_section_refusal(Hi,Lo,Lo,"ambiguous data byte intervals"):-
+    riscv_outside_data_interval(Hi,Lo,Beg1,End1),
+    riscv_outside_data_interval(Hi,Lo,Beg2,End2),
+    (Beg1 != Beg2; End1 != End2).
+riscv_outside_section_refusal(Hi,Lo,Lo,"no strictly interior data anchor"):-
+    riscv_outside_data_section(Hi,Lo,_,Beg,End),
+    First = min A:{ riscv_outside_access(Hi,Lo,_,A,_) },
+    (First <= as(Beg,number); First >= as(End,number)).
+riscv_outside_section_refusal(Hi,Lo,Hi,"input symbol collides with HI label"):-
+    riscv_outside_section_candidate(Hi,Lo,_,_,_),
+    HiName = cat(".L_pcrel_",@to_string_hex(Hi)),
+    symbol(_,_,_,_,_,_,_,_,HiName).
+riscv_outside_section_refusal(Hi,Lo,Lo,"input symbol collides with data label"):-
+    riscv_outside_data_section(Hi,Lo,Section,Beg,_),
+    First = min A:{ riscv_outside_access(Hi,Lo,_,A,_) },
+    First > as(Beg,number),
+    Name = cat(".L_riscv_outside_data_",cat(Section,
+        cat("_",@to_string_hex(as(First,address)-Beg)))),
+    symbol(_,_,_,_,_,_,_,_,Name).
+
+// Choose a section-relative synthetic data label at an actually accessed
+// interior address. This is independent of original STT_OBJECT/SYMTAB names.
+.decl riscv_outside_section_certificate(Hi:address,Lo:address,Index:operand_index,
+                                      Target:address,Anchor:address,
+                                      Name:symbol,SymbolName:symbol)
+.output riscv_outside_section_certificate
+riscv_outside_section_certificate(Hi,Lo,Index,Target,Anchor,Name,SymbolName):-
+    riscv_outside_section_candidate(Hi,Lo,Index,_,Target),
+    riscv_outside_pair_extent(Hi,Lo,Index),
+    riscv_outside_data_section(Hi,Lo,Name,Beg,End),
+    !riscv_outside_section_refusal(Hi,Lo,_,_),
+    First = min A:{ riscv_outside_access(Hi,Lo,_,A,_) },
+    Anchor = as(First,address), Anchor > Beg, Anchor < End,
+    riscv_outside_data_interval(Hi,Lo,IntervalBeg,IntervalEnd),
+    Anchor >= IntervalBeg, Anchor < IntervalEnd,
+    // Identity is section-relative. It remains independent of input SYMTAB.
+    SymbolName = cat(".L_riscv_outside_data_",cat(Name,
+        cat("_",@to_string_hex(Anchor-Beg)))),
+    !symbol(_,_,_,_,_,_,_,_,SymbolName),
+    HiName = cat(".L_pcrel_",@to_string_hex(Hi)),
+    !symbol(_,_,_,_,_,_,_,_,HiName).
+
+inferred_symbol(Anchor,Name,"LOCAL","DEFAULT","OBJECT","Beg"):-
+    riscv_outside_section_certificate(_,_,_,_,Anchor,_,Name).
+labeled_ea(Anchor):-
+    riscv_outside_section_certificate(_,_,_,_,Anchor,_,_).
+
+.decl riscv_outside_hi_symbol(Hi:address,Name:symbol)
+riscv_outside_hi_symbol(Hi,Name):-
+    riscv_outside_section_certificate(Hi,_,_,_,_,_,_),
+    Name = cat(".L_pcrel_",@to_string_hex(Hi)).
+inferred_symbol(Hi,Name,"LOCAL","DEFAULT","NONE","Beg"):-
+    riscv_outside_hi_symbol(Hi,Name).
+block_needs_splitting_at(Hi):-
+    riscv_outside_hi_symbol(Hi,_), code_in_block(Hi,Block), Hi != Block.
+block_must_not_merge(Hi):- riscv_outside_hi_symbol(Hi,_).
+// Claim these operands before deciding success. Existing symbol-coincidence
+// fallbacks must not resurrect a refused outside-section numeric base.
+custom_symbolic_expr_operand(Hi,1):-
+    riscv_outside_section_candidate(Hi,_,_,_,_).
+custom_symbolic_expr_operand(Lo,Index):-
+    riscv_outside_section_candidate(_,Lo,Index,_,_).
+
+symbolic_expr(Hi+Offset,Size,Name,Addend),
+symbolic_expr_symbol_address(Hi+Offset,1,Name,Anchor):-
+    riscv_outside_section_certificate(Hi,_,_,Target,Anchor,_,Name),
+    instruction_immediate_offset(Hi,1,Offset,Size),
+    Addend = as(Target,number)-as(Anchor,number).
+symbolic_expr(Lo+Offset,Size,Name,0),
+symbolic_expr_symbol_address(Lo+Offset,1,Name,Hi):-
+    riscv_outside_section_certificate(Hi,Lo,Index,_,_,_,_),
+    riscv_outside_hi_symbol(Hi,Name),
+    instruction_immediate_offset(Lo,Index,Offset,Size).
+symbolic_operand_attribute(Hi,1,"PCREL"),
+symbolic_operand_attribute(Hi,1,"HI"):- riscv_outside_hi_symbol(Hi,_).
+symbolic_operand_attribute(Lo,Index,"PCREL"),
+symbolic_operand_attribute(Lo,Index,"LO"):-
+    riscv_outside_section_certificate(_,Lo,Index,_,_,_,_).
+
+#include "riscv_outside_jump_table.dl"
