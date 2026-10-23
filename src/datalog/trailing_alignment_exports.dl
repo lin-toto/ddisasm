@@ -1,0 +1,402 @@
+//===- trailing_alignment_exports.dl ------------------------*- datalog -*-===//
+//
+// Copyright (C) 2026 GrammaTech, Inc.
+// This code is licensed under the GNU Affero General Public License,
+// version 3 or later. See LICENSE.txt in the project root.
+//
+//===----------------------------------------------------------------------===//
+
+/*
+The existing refined-block, symbolization, CFG and function relations are the
+provisional evidence graph. Do not remove code from that graph to prove that
+it has no references. The final_* relations below are export-only: no code,
+value, register, symbolization or function analysis may consume them.
+
+Only a complete, minimal RISC-V zero/C.UNIMP gap before an independently
+supported function start is considered here. C.UNIMP remains a real trap in
+every other case; neither arch.is_nop nor is_padding changes.
+*/
+
+.decl riscv_alignment_function_start(EA:address)
+
+// A static function symbol is not independent support: strip --strip-all
+// removes it. Entry and runtime FDE addresses survive that operation. For a
+// call, require the decoded immediate to agree with the provisional target;
+// a target recovered only from a symbol/relocation name does not qualify.
+riscv_alignment_function_start(EA):-
+    function_inference.function_entry(EA),
+    (
+        entry_point(EA);
+        fde_addresses(EA,_);
+        direct_call(Call,EA), code(Call), !pc_load_call(Call,EA),
+            arch.call(Call,Index), instruction_get_op(Call,Index,Op),
+            op_immediate(Op,Target,_), EA = as(Target,address)
+    ).
+
+.decl riscv_trailing_alignment_candidate(
+    PrevBlock:address, PrevInst:address, Begin:address, End:address,
+    Align:unsigned)
+.output riscv_trailing_alignment_candidate
+
+riscv_trailing_alignment_candidate(PrevBlock,PrevInst,Begin,End,Align):-
+    (binary_isa("RISCV32"); binary_isa("RISCV64")),
+    binary_format("ELF"),
+    (binary_type("EXEC"); binary_type("DYN")),
+    // The encoded control-flow destinations below must already be final.
+    // A loader relocation of text needs a different, separately proved rule.
+    !elf_has_runtime_text_relocations(),
+    block_information(PrevBlock,_,_,Begin),
+    refined_block_control_instruction(PrevBlock,PrevInst),
+    !may_fallthrough(PrevInst,Begin),
+    (
+        unconditional_jump(PrevInst), direct_jump(PrevInst,Target), code(Target),
+            instruction_get_operation(PrevInst,Operation),
+            arch.jump_operation_op_index(Operation,Index),
+            instruction_get_op(PrevInst,Index,Op),
+            op_immediate(Op,EncodedTarget,_), Target = as(EncodedTarget,address);
+        unconditional_return(PrevInst)
+    ),
+    block_information(Begin,Size,Begin,End),
+    Size > 0,
+    riscv_alignment_function_start(End),
+    code_section(Name),
+    section(Name,SectionSize,SectionBegin,Align,_),
+    loaded_section(SectionBegin,SectionBegin+SectionSize,Name),
+    SectionBegin <= PrevInst, End < SectionBegin + SectionSize,
+    // Restrict the new classification to small power-of-two alignments.
+    4 <= Align, Align <= 16, (Align band (Align-1)) = 0,
+    Begin % Align != 0, End % Align = 0,
+    End - Begin = Align - (Begin % Align),
+    byte_interval(IntervalBegin,IntervalEnd),
+    IntervalBegin <= PrevInst, End < IntervalEnd.
+
+.decl riscv_trailing_alignment_refusal(
+    Begin:address, End:address, Reason:symbol, Evidence:address)
+.output riscv_trailing_alignment_refusal
+
+// The entire provisional block must decode as two-byte zero C.UNIMP fill.
+// Check retained bytes as well as the decoder's operation name.
+riscv_trailing_alignment_refusal(Begin,End,"nonzero or non-C.UNIMP fill",EA):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    code_in_refined_block(EA,Begin),
+    (
+        !instruction(EA,2,_,"C.UNIMP",_,_,_,_,_,_);
+        !data_uword(EA,2,0)
+    ).
+
+// A real trap at the independently supported next entry is binary evidence
+// that survives symbol/relocation stripping. Keep the whole preceding gap as
+// code in this ambiguous zero-fill boundary case, even if an original static
+// expression span that also vetoed it is removed by strip --strip-all.
+// This narrows admission; it does not waive any reference/span conflict.
+riscv_trailing_alignment_refusal(Begin,End,"next function starts with zero C.UNIMP",End):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    instruction(End,2,_,"C.UNIMP",_,_,_,_,_,_),
+    data_uword(End,2,0).
+
+riscv_trailing_alignment_refusal(Begin,End,"overlapping code block",Other):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    block_information(Other,_,OtherBegin,OtherEnd), Other != Begin,
+    OtherBegin < End, Begin < OtherEnd.
+
+riscv_trailing_alignment_refusal(Begin,End,"overlapping loaded sections",OtherBegin):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    code_section(Name), loaded_section(SectionBegin,SectionEnd,Name),
+    SectionBegin <= Begin, End < SectionEnd,
+    loaded_section(OtherBegin,OtherEnd,OtherName), OtherName != Name,
+    OtherBegin < End, Begin < OtherEnd.
+
+riscv_trailing_alignment_refusal(Begin,End,"existing data classification overlaps gap",DataBegin):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    initialized_data_segment(DataBegin,DataEnd),
+    DataBegin < End, Begin < DataEnd.
+
+riscv_trailing_alignment_refusal(Begin,End,"known input code",EA):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    known_code(EA), Begin <= EA, EA < End.
+
+riscv_trailing_alignment_refusal(Begin,End,"incoming provisional CFG edge",Source):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    cfg_edge(Source,Target,_,_,_), Begin <= Target, Target < End.
+
+// Inspect instruction targets and table candidates as well as exported edges.
+// Candidate targets count as gap-specific unknown evidence even if a later
+// heuristic did not choose them for the provisional CFG.
+riscv_trailing_alignment_refusal(Begin,End,"binary transfer target",Source):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    (
+        direct_call(Source,Target);
+        direct_jump(Source,Target);
+        resolved_transfer(Source,Target,_);
+        jump_table_candidate(Source,_,_,Target);
+        jump_table_candidate_refined(Source,_,Target);
+        jump_table_target(Source,Target)
+    ),
+    code(Source), Begin <= Target, Target < End.
+
+riscv_trailing_alignment_refusal(Begin,End,"relative table target",Location):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    (
+        relative_address(Location,_,_,_,Target,_);
+        relative_jump_table_entry_candidate(Location,_,_,_,Target,_,_);
+        relative_jump_table_entry(Location,_,_,_,Target,_,_)
+    ),
+    Begin <= Target, Target < End.
+
+// Runtime dynamic symbols are retained by strip --strip-all and can expose a
+// gap to callers outside this module. Static labels and sizes cannot alone
+// veto a gap through these checks. Reference/ownership analyses can still
+// consume symbols: qualification must compare their original/stripped
+// provisional evidence as well as the final padding decisions.
+riscv_trailing_alignment_refusal(Begin,End,"runtime dynamic symbol in gap",EA):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    defined_symbol(EA,_,_,_,_,_,".dynsym",_,_), Begin <= EA, EA < End.
+
+riscv_trailing_alignment_refusal(Begin,End,"entry or function start in gap",EA):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    (
+        entry_point(EA);
+        riscv_alignment_function_start(EA);
+        dynamic_entry("INIT",EA);
+        dynamic_entry("FINI",EA)
+    ),
+    Begin <= EA, EA < End.
+
+// Runtime function/unwind extents may end exactly at Begin or start at End.
+// A positive extent covering any byte of the proposed gap is a conflict.
+riscv_trailing_alignment_refusal(Begin,End,"runtime function or unwind extent covers gap",EA):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    (
+        fde_addresses(EA,ExtentEnd);
+        defined_symbol(EA,Size,"FUNC",_,_,_,".dynsym",_,_),
+            Size > 0, ExtentEnd = EA + Size;
+        defined_symbol(EA,Size,"GNU_IFUNC",_,_,_,".dynsym",_,_),
+            Size > 0, ExtentEnd = EA + Size
+    ),
+    EA < End, Begin < ExtentEnd.
+
+riscv_trailing_alignment_refusal(Begin,End,"unwind boundary inside gap",EA):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    (fde_addresses(EA,_); fde_addresses(_,EA)),
+    Begin < EA, EA < End.
+
+// CFI at the preceding real block's end remains attached to that block.
+// An actual directive anchored to the proposed gap must never be discarded.
+riscv_trailing_alignment_refusal(Begin,End,"CFI directive anchored in gap",Block):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    cfi_directive(Block,_,_,_,_,_,_,_), Begin <= Block, Block < End.
+
+riscv_trailing_alignment_refusal(Begin,End,"exception callsite or landing pad",EA):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    (
+        lsda_callsite_addresses(EA,_,_);
+        lsda_callsite_addresses(_,EA,_);
+        lsda_callsite_addresses(_,_,EA)
+    ),
+    Begin <= EA, EA < End.
+
+riscv_trailing_alignment_refusal(Begin,End,"exception callsite covers gap",EA):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    lsda_callsite_addresses(EA,CallsiteEnd,_),
+    EA < End, Begin < CallsiteEnd.
+
+riscv_trailing_alignment_refusal(Begin,End,"relocation in gap",Location):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    relocation(Location,_,_,_,_,_,_), Begin <= Location, Location < End.
+
+riscv_trailing_alignment_refusal(Begin,End,"relocation span overlaps gap",Location):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    relocation(Location,Type,_,_,_,_,_), relocation_size(Type,SizeBits),
+    Location < End, Begin < Location + (SizeBits+7)/8.
+
+riscv_trailing_alignment_refusal(Begin,End,"unknown adjacent relocation width",Location):-
+    riscv_trailing_alignment_candidate(_,PrevInst,Begin,End,_),
+    relocation(Location,Type,_,_,_,_,_), !relocation_size(Type,_),
+    PrevInst <= Location, Location < End.
+
+riscv_trailing_alignment_refusal(Begin,End,"relocation target in gap",Location):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    symbolic_expr_from_relocation(Location,_,_,_,Target),
+    Begin <= Target, Target < End.
+
+// Do not reconstruct a target by joining a relocation name to .symtab.
+// Its table can disappear on stripping, and the relocation's Section field
+// identifies the relocated section, not its symbol-table origin. Inspect the
+// encoded control destinations and AUIPC upper address independently instead.
+// Actual relocation
+// sources/spans and exported expression sources/spans/anchors remain hard
+// conflicts above and below, including retained-static expression hazards.
+riscv_trailing_alignment_refusal(Begin,End,"decoded binary target in gap",Location):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    (
+        arch.pc_relative_addr(Location,_,Target);
+        arch.call(Location,Index), instruction_get_op(Location,Index,Op),
+            op_immediate(Op,EncodedTarget,_), Target = as(EncodedTarget,address);
+        arch.jump(Location), instruction_get_operation(Location,Operation),
+            arch.jump_operation_op_index(Operation,Index),
+            instruction_get_op(Location,Index,Op),
+            op_immediate(Op,EncodedTarget,_), Target = as(EncodedTarget,address)
+    ),
+    code(Location),
+    Begin <= Target, Target < End.
+
+riscv_trailing_alignment_refusal(Begin,End,"symbolic-expression span overlaps gap",Location):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    (
+        symbolic_expr(Location,Size,_,_);
+        symbolic_expr_symbol_minus_symbol(Location,Size,_,_,_,_)
+    ),
+    Location < End, Begin < Location + Size.
+
+riscv_trailing_alignment_refusal(Begin,End,"symbolic-expression source in gap",Location):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    (
+        symbolic_expr(Location,_,_,_);
+        symbolic_expr_symbol_minus_symbol(Location,_,_,_,_,_)
+    ),
+    Begin <= Location, Location < End.
+
+riscv_trailing_alignment_refusal(Begin,End,"unknown adjacent expression width",Location):-
+    riscv_trailing_alignment_candidate(_,PrevInst,Begin,End,_),
+    (
+        symbolic_expr(Location,0,_,_);
+        symbolic_expr_symbol_minus_symbol(Location,0,_,_,_,_)
+    ),
+    PrevInst <= Location, Location < End.
+
+riscv_trailing_alignment_refusal(Begin,End,"symbolic-expression anchor in gap",Location):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    symbolic_expr_symbol_address(Location,_,_,Target),
+    Begin <= Target, Target < End.
+
+riscv_trailing_alignment_refusal(Begin,End,"symbol-plus-addend target in gap",Location):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    symbolic_expr(Location,_,Name,Addend),
+    symbolic_expr_symbol_address(Location,1,Name,SymbolEA),
+    Target = as(SymbolEA,number) + Addend,
+    as(Begin,number) <= Target, Target < as(End,number).
+
+riscv_trailing_alignment_refusal(Begin,End,"symbolic operand or data target",Location):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    (
+        symbolic_operand(Location,_,Target,_);
+        symbolic_operand_candidate(Location,_,Target,_);
+        symbolic_data(Location,_,Target);
+        code_pointer_in_data(Location,Target);
+        moved_label(Location,_,_,Target);
+        moved_data_label(Location,_,_,Target);
+        symbol_minus_symbol(Location,_,Target,_,_,_);
+        symbol_minus_symbol(Location,_,_,Target,_,_)
+    ),
+    Begin <= Target, Target < End.
+
+riscv_trailing_alignment_refusal(Begin,End,"potential input pointer to gap",Location):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    address_in_data(Location,Target), Begin <= Target, Target < End.
+
+riscv_trailing_alignment_refusal(Begin,End,"memory access overlaps gap",Access):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    data_access_pattern(Location,Size,_,Access),
+    Location < End, Begin < Location + Size.
+
+riscv_trailing_alignment_refusal(Begin,End,"unknown-width memory access in gap",Access):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    data_access_pattern(Location,0,_,Access),
+    Begin <= Location, Location < End.
+
+.decl riscv_alignment_predecessor_owner(Begin:address,End:address,Function:address)
+
+riscv_alignment_predecessor_owner(Begin,End,Function):-
+    riscv_trailing_alignment_candidate(PrevBlock,_,Begin,End,_),
+    function_inference.in_function(PrevBlock,Function).
+
+riscv_trailing_alignment_refusal(Begin,End,"unknown preceding function ownership",PrevBlock):-
+    riscv_trailing_alignment_candidate(PrevBlock,_,Begin,End,_),
+    !riscv_alignment_predecessor_owner(Begin,End,_).
+
+riscv_trailing_alignment_refusal(Begin,End,"conflicting preceding function ownership",Function):-
+    riscv_alignment_predecessor_owner(Begin,End,Function),
+    riscv_alignment_predecessor_owner(Begin,End,Other), Function != Other.
+
+// An unresolved non-return transfer within the preceding function is
+// gap-specific unknown evidence. Unrelated module-level top edges are not a
+// veto: a positive candidate/reference naming the gap is checked above.
+riscv_trailing_alignment_refusal(Begin,End,"unresolved preceding-function transfer",Source):-
+    riscv_alignment_predecessor_owner(Begin,End,Function),
+    function_inference.in_function(Source,Function),
+    cfg_edge_to_top(Source,_,Type), (Type = "branch"; Type = "call").
+
+.decl riscv_trailing_alignment_padding(Begin:address,Size:unsigned)
+.output riscv_trailing_alignment_padding
+
+riscv_trailing_alignment_padding(Begin,End-Begin):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
+    !riscv_trailing_alignment_refusal(Begin,End,_,_).
+
+padding(Begin,Size):-
+    riscv_trailing_alignment_padding(Begin,Size).
+
+// These export-only relations are identities for other architectures and for
+// every refused gap. Keep the internal provisional graph intact and auditable.
+.decl final_refined_block(Block:address)
+.output final_refined_block
+.decl final_code_in_refined_block(EA:address,Block:address)
+.output final_code_in_refined_block
+.decl final_block_information(Block:address,Size:unsigned,Start:address,End:address)
+.output final_block_information
+.decl final_initialized_data_segment(Begin:address,End:address)
+.output final_initialized_data_segment
+.decl final_function_entry_name(Entry:address,Name:symbol)
+.output final_function_entry_name
+.decl final_in_function(Block:address,Function:address)
+.output final_in_function
+.decl final_cfg_edge(Source:address,Target:address,Conditional:symbol,Indirect:symbol,Type:symbol)
+.output final_cfg_edge
+.decl final_cfg_edge_to_top(Source:address,Conditional:symbol,Type:symbol)
+.output final_cfg_edge_to_top
+.decl final_cfg_edge_to_symbol(Source:address,Name:symbol,Conditional:symbol,Indirect:symbol,Type:symbol)
+.output final_cfg_edge_to_symbol
+.decl final_cfi_directive(Block:address,Offset:unsigned,Index:unsigned,Directive:symbol,
+                          Reference:symbol,NumOperands:unsigned,Op1:number,Op2:number)
+.output final_cfi_directive
+
+final_refined_block(Block):-
+    refined_block(Block), !riscv_trailing_alignment_padding(Block,_).
+
+final_code_in_refined_block(EA,Block):-
+    code_in_refined_block(EA,Block), final_refined_block(Block).
+
+final_block_information(Block,Size,Start,End):-
+    block_information(Block,Size,Start,End), final_refined_block(Block).
+
+final_initialized_data_segment(Begin,End):-
+    initialized_data_segment(Begin,End).
+
+final_initialized_data_segment(Begin,Begin+Size):-
+    riscv_trailing_alignment_padding(Begin,Size).
+
+final_function_entry_name(Entry,Name):-
+    function_inference.function_entry_name(Entry,Name),
+    !riscv_trailing_alignment_padding(Entry,_).
+
+final_in_function(Block,Function):-
+    function_inference.in_function(Block,Function),
+    !riscv_trailing_alignment_padding(Block,_),
+    !riscv_trailing_alignment_padding(Function,_).
+
+final_cfg_edge(Source,Target,Conditional,Indirect,Type):-
+    cfg_edge(Source,Target,Conditional,Indirect,Type),
+    !riscv_trailing_alignment_padding(Source,_),
+    !riscv_trailing_alignment_padding(Target,_).
+
+final_cfg_edge_to_top(Source,Conditional,Type):-
+    cfg_edge_to_top(Source,Conditional,Type),
+    !riscv_trailing_alignment_padding(Source,_).
+
+final_cfg_edge_to_symbol(Source,Name,Conditional,Indirect,Type):-
+    cfg_edge_to_symbol(Source,Name,Conditional,Indirect,Type),
+    !riscv_trailing_alignment_padding(Source,_).
+
+final_cfi_directive(Block,Offset,Index,Directive,Reference,NumOperands,Op1,Op2):-
+    cfi_directive(Block,Offset,Index,Directive,Reference,NumOperands,Op1,Op2),
+    !riscv_trailing_alignment_padding(Block,_).

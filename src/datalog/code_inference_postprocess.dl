@@ -247,3 +247,7 @@ A function `Func` contains at least one `return` instruction.
 refined_block_contains_return_in_func(Func) :-
     function_inference.in_function(Block, Func),
     refined_block_contains_return(Block).
+
+// Inspect the complete provisional graph before removing alignment fill from
+// the final exported code/CFG/function relations.
+#include "trailing_alignment_exports.dl"

@@ -43,7 +43,7 @@ TEST(LiveRegistersTest, OverlappingBlocks)
                             "0x1004\t0x1004", "0x1008\t0x1004"})
     {
         DatalogIO::insertTuple(Tuple, *Program,
-                              Program->getRelation("code_in_refined_block"));
+                              Program->getRelation("final_code_in_refined_block"));
     }
     for(const char *Tuple : {"0x1000\t0", "0x1004\t0", "0x1004\t1"})
     {

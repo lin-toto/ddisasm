@@ -769,7 +769,7 @@ void buildSymbolicExprOnce(gtirb::Module &Module, const gtirb::Addr &Ea,
 void buildCodeSymbolicInformation(gtirb::Module &Module, souffle::SouffleProgram &Program)
 {
     std::set<gtirb::Addr> Code;
-    for(auto &output : *Program.getRelation("code_in_refined_block"))
+    for(auto &output : *Program.getRelation("final_code_in_refined_block"))
     {
         gtirb::Addr EA;
         output >> EA;
@@ -819,9 +819,11 @@ void buildCodeBlocks(gtirb::Context &Context, gtirb::Module &Module,
                      souffle::SouffleProgram &Program)
 {
     auto BlockInfo =
-        convertSortedRelation<VectorByEA<BlockInformation>>("block_information", Program);
+        convertSortedRelation<VectorByEA<BlockInformation>>("final_block_information", Program);
 
-    for(auto &Tuple : *Program.getRelation("refined_block"))
+    // Final relations are filtered only after the complete provisional graph
+    // has supplied positive references and padding refusal evidence.
+    for(auto &Tuple : *Program.getRelation("final_refined_block"))
     {
         gtirb::Addr BlockAddress;
         Tuple >> BlockAddress;
@@ -882,7 +884,7 @@ void buildLiveRegisters(gtirb::Module &Module, souffle::SouffleProgram &Program)
     gtirb::schema::LiveRegisterSets::Type RegisterSets;
     gtirb::schema::LiveRegisterSetsHigh::Type RegisterSetsHigh;
     const bool Wide = RegisterNames.size() > 64;
-    for(auto &Output : *Program.getRelation("code_in_refined_block"))
+    for(auto &Output : *Program.getRelation("final_code_in_refined_block"))
     {
         gtirb::Addr EA, BlockAddress;
         Output >> EA >> BlockAddress;
@@ -983,7 +985,7 @@ void buildDataBlocks(gtirb::Context &Context, gtirb::Module &Module,
 
     std::map<gtirb::Offset, uint64_t> SymbolicSizes;
 
-    for(auto &Output : *Program.getRelation("initialized_data_segment"))
+    for(auto &Output : *Program.getRelation("final_initialized_data_segment"))
     {
         gtirb::Addr Begin, End;
         Output >> Begin >> End;
@@ -1285,7 +1287,7 @@ void buildFunctions(gtirb::Module &Module, souffle::SouffleProgram &Program)
     std::map<gtirb::UUID, gtirb::UUID> FunctionNames;
     boost::uuids::random_generator Generator;
 
-    for(auto &T : *Program.getRelation("function_inference.function_entry_name"))
+    for(auto &T : *Program.getRelation("final_function_entry_name"))
     {
         gtirb::Addr FunctionEntry;
         std::string FunctionName;
@@ -1313,7 +1315,7 @@ void buildFunctions(gtirb::Module &Module, souffle::SouffleProgram &Program)
     }
 
     std::map<gtirb::UUID, std::set<gtirb::UUID>> FunctionBlocks;
-    for(auto &T : *Program.getRelation("function_inference.in_function"))
+    for(auto &T : *Program.getRelation("final_in_function"))
     {
         gtirb::Addr BlockAddr, FunctionEntryAddr;
         T >> BlockAddr >> FunctionEntryAddr;
@@ -1360,7 +1362,7 @@ std::map<gtirb::Addr, std::string> getPltBlocks(gtirb::Module &Module,
 void buildCFG(gtirb::Context &Context, gtirb::Module &Module, souffle::SouffleProgram &Program)
 {
     auto &Cfg = Module.getIR()->getCFG();
-    for(auto &Output : *Program.getRelation("cfg_edge"))
+    for(auto &Output : *Program.getRelation("final_cfg_edge"))
     {
         gtirb::Addr SrcAddr, DestAddr;
         std::string Conditional, Indirect, Type;
@@ -1380,7 +1382,7 @@ void buildCFG(gtirb::Context &Context, gtirb::Module &Module, souffle::SoufflePr
         Cfg[*E] = std::make_tuple(IsConditional, IsIndirect, edgeType);
     }
     auto *TopBlock = Module.addProxyBlock(Context);
-    for(auto &Output : *Program.getRelation("cfg_edge_to_top"))
+    for(auto &Output : *Program.getRelation("final_cfg_edge_to_top"))
     {
         gtirb::Addr SrcAddr;
         std::string Conditional, Type;
@@ -1393,7 +1395,7 @@ void buildCFG(gtirb::Context &Context, gtirb::Module &Module, souffle::SoufflePr
         Cfg[*E] = std::make_tuple(isConditional, gtirb::DirectEdge::IsIndirect, EdgeType);
     }
     auto PltBlocks = getPltBlocks(Module, Program);
-    for(auto &T : *Program.getRelation("cfg_edge_to_symbol"))
+    for(auto &T : *Program.getRelation("final_cfg_edge_to_symbol"))
     {
         gtirb::Addr EA;
         std::string Name;
@@ -1494,7 +1496,7 @@ void buildCfiDirectives(gtirb::Module &Module, souffle::SouffleProgram &Program)
 {
     std::map<gtirb::Offset, std::vector<std::tuple<std::string, std::vector<int64_t>, gtirb::UUID>>>
         CfiDirectives;
-    for(auto &output : *Program.getRelation("cfi_directive"))
+    for(auto &output : *Program.getRelation("final_cfi_directive"))
     {
         gtirb::Addr BlockAddr;
         std::string Directive, Reference;

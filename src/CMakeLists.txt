@@ -147,6 +147,7 @@ set(DATALOG_BASE_SOURCES
     datalog/boundary_value_analysis.dl
     datalog/code_inference.dl
     datalog/code_inference_postprocess.dl
+    datalog/trailing_alignment_exports.dl
     datalog/code_inference_weights.dl
     datalog/cfg.dl
     datalog/data.dl
