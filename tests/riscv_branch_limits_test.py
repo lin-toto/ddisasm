@@ -131,11 +131,11 @@ class RiscvBranchLimitsTest(unittest.TestCase):
 .option norvc
 .option norelax
 .text
-.globl _start, probe, fallthrough, taken
+.globl _start, fallthrough, taken
 .type _start,@function
 _start:
     li t0,6
-probe:
+.Lprobe:
     {mnemonic} {lhs},{rhs},taken
 fallthrough:
     li a7,93
@@ -160,6 +160,10 @@ taken:
                 "--debug-dir", str(debug),
             ], check=True, capture_output=True, timeout=120)
             addresses = read_symbol_addresses(binary)
+            # A global probe symbol would split the constant definition and
+            # branch into separate blocks, outside this rule's same-block scope.
+            # With norvc, the preceding li t0,6 is one four-byte instruction.
+            addresses["probe"] = addresses["_start"] + 4
             relations = debug / "disassembly"
             comparisons = relation_rows(
                 (relations / "compare_and_jump_register.csv").read_text(), 5)
