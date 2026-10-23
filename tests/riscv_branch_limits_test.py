@@ -75,7 +75,7 @@ def read_symbol_addresses(binary):
     symbols = {}
     for line in result.stdout.splitlines():
         fields = line.split()
-        if len(fields) >= 8 and fields[0].endswith(":"):
+        if len(fields) >= 8 and fields[0].endswith(":") and fields[0][:-1].isdigit():
             symbols[fields[7]] = int(fields[1], 16)
     return symbols
 

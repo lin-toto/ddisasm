@@ -47,7 +47,7 @@ def symbol_addresses(binary):
     result = {}
     for line in output.splitlines():
         fields = line.split()
-        if len(fields) >= 8 and fields[0].endswith(":"):
+        if len(fields) >= 8 and fields[0].endswith(":") and fields[0][:-1].isdigit():
             result[fields[7]] = int(fields[1], 16)
     return result
 
