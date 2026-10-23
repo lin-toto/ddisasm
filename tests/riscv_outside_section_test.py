@@ -425,7 +425,7 @@ class RiscvOutsideSectionTest(unittest.TestCase):
                     ".option norvc\nbeqz a0,.Lselected\n.option rvc\n.Lstep: c.addiw s0," + ("2" if mutation == "counter_wrong_step" else "1") + \
                     "\nc.ldsp t0,0(sp)\nc.addi s2,16\nbne s0,s4,.Lloop\nj .Ldone\n"
                 if mutation == "unbounded_first_index":
-                    loop = "mv s0,a1\nj .Lselected\n"
+                    loop = "mv s0,a1\nj .Lselected\n.Lstep: j .Ldone\n"
                 bound = "li a4," + ("2147483648" if mutation == "large_LW_LWU_bound" else "4") + "\n"
                 guard = ("blt" if mutation == "signed_guard" else "bltu") + " a4,a3,.Ldefault\n"
                 between = {"base_redefinition": "addi a5,a5,16\n", "store": "sw zero,8(a5)\n",
