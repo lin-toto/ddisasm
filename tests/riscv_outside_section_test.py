@@ -444,7 +444,7 @@ class RiscvOutsideSectionTest(unittest.TestCase):
                     targets = targets[:4]
                 records = 1 if mutation == "first_map_past_interval" else 13
                 data = ".data\n.balign 8\nmap_records:\n" + ".zero 8\n.word 0\n.zero 4\n" * records + \
-                    section + "\n.balign 4\nfinal_table:\n" + \
+                    ".section " + section + "\n.balign 4\nfinal_table:\n" + \
                     "".join(".word " + target + "-final_table\n" for target in targets)
                 default = ".Ldefault: li a0,0\n"
                 extra_region = ""
@@ -464,7 +464,7 @@ class RiscvOutsideSectionTest(unittest.TestCase):
                         "addi t1,t1,%pcrel_lo(.Lother_hi)\nslli a5,a1,2\nadd a5,a5,t1\n" + \
                         "lw a5,0(a5)\nadd a5,a5,t1\n.option rvc\nc.jr a5\n.option norvc\n" + \
                         ".Lother_return: ret\n.cfi_endproc\n"
-                    data += ".rodata\n.balign 4\nother_table:\n.word .Lother_return-other_table\n"
+                    data += ".section .rodata\n.balign 4\nother_table:\n.word .Lother_return-other_table\n"
                 text = "_start:\n.cfi_startproc\n" + PREFIX + ACCESS + ".option rvc\n" + before + loop + \
                     ".Lselected: c.slli s0,32\nc.srli s0,32\n.option norvc\n" + \
                     ".Lmap_hi: auipc s2,%pcrel_hi(map_records)\naddi s2,s2,%pcrel_lo(.Lmap_hi)\n" + \
@@ -821,7 +821,7 @@ class RiscvOutsideSectionTest(unittest.TestCase):
                     ".option rvc\njr a5\n.option norvc\n"
                     "case0: ld a0,-2008(s1)\nj done\ncase1: ld a0,-2000(s1)\nj done\n"
                     + default + "done: ret\n.cfi_endproc\n"
-                    "outside:\n.cfi_startproc\nret\n.cfi_endproc\n" + section +
+                    "outside:\n.cfi_startproc\nret\n.cfi_endproc\n.section " + section +
                     "\n.balign 4\ntable: .word case0-table," + second + "-table\n.bss\n.space 256\n")
                 # Bind the LO to the actual AUIPC label, not the ADDI.
                 text = source.read_text().replace("auipc a4,%pcrel_hi(table)", ".Ltable_hi: auipc a4,%pcrel_hi(table)")
