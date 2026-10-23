@@ -1212,6 +1212,38 @@ target-table instead of preserving stale raw bytes.
 .decl riscv_relative_jump_table_base(EAJump:address,TableStart:address)
 .decl riscv_scale_index_by_4(EA:address,Reg:register)
 
+// Keep the indexed address's definition when register allocation copies it
+// before the load. Only full-width MV/C.MV or ADDI with zero preserves this
+// address; narrowing operations and loads are not copy edges. Each edge
+// follows a reaching definition, so overwriting a copied register breaks it.
+.decl riscv_jump_table_address_def(Origin:address,OriginReg:register,
+                                   Def:address,Reg:register)
+.decl riscv_jump_table_address_use(Origin:address,OriginReg:register,
+                                   Use:address,Reg:register)
+
+riscv_jump_table_address_def(EAAddr,RegAddr,EAAddr,RegAddr):-
+    riscv_split_load(_,EABase,_,_),
+    reg_def_use.def_used(EABase,RegBase,EAAddr,_),
+    arch.reg_reg_arithmetic_operation(EAAddr,RegAddr,RegIndex,RegBase,1,0),
+    RegBase != RegIndex.
+
+riscv_jump_table_address_def(Origin,OriginReg,EACopy,Dst):-
+    riscv_jump_table_address_def(Origin,OriginReg,EADef,Src),
+    reg_def_use.def_used(EADef,Src,EACopy,_),
+    (
+        arch.move_reg_reg(EACopy,Dst,Src),
+        instruction_get_operation(EACopy,Operation),
+        (Operation = "MV"; Operation = "C.MV")
+        ;
+        instruction_get_operation(EACopy,"ADDI"),
+        arch.reg_arithmetic_operation(EACopy,Dst,Src,1,0)
+    ),
+    Dst != "ZERO".
+
+riscv_jump_table_address_use(Origin,OriginReg,EAUse,Reg):-
+    riscv_jump_table_address_def(Origin,OriginReg,EADef,Reg),
+    reg_def_use.def_used(EADef,Reg,EAUse,_).
+
 riscv_scale_index_by_4(EA,Reg):-
     arch.reg_arithmetic_operation(EA,Reg,_,4,0).
 
@@ -1242,13 +1274,13 @@ riscv_relative_jump_table_access(EAJump,TableStart,EALoad,RegIndexScaled):-
     arch.reg_reg_arithmetic_operation(EAAddr,RegAddr,RegIndexScaled,RegBase,1,0),
     RegBase != RegIndexScaled,
     reg_def_use.def_used(EABase,RegBase,EAAddr,_),
-    reg_def_use.def_used(EAAddr,RegAddr,EALoad,_),
-    arch.memory_access("LOAD",EALoad,_,_,RegTarget,RegAddr,"NONE",1,0),
+    riscv_jump_table_address_use(EAAddr,RegAddr,EALoad,LoadAddrReg),
+    arch.memory_access("LOAD",EALoad,_,_,RegTarget,LoadAddrReg,"NONE",1,0),
     (
         instruction_get_operation(EALoad,"LW");
         instruction_get_operation(EALoad,"C.LW")
     ),
-    data_access(EALoad,_,_,RegAddr,"NONE",1,0,4),
+    data_access(EALoad,_,_,LoadAddrReg,"NONE",1,0,4),
     reg_def_use.def_used(EALoad,RegTarget,EAAdd,_),
     arch.reg_reg_arithmetic_operation(EAAdd,RegJump,RegTarget,RegBase,1,0),
     reg_def_use.def_used(EABase,RegBase,EAAdd,_),
@@ -1286,13 +1318,13 @@ riscv_relative_jump_table_access(EAJump,TableStart,EALoad,RegIndex):-
     arch.reg_reg_arithmetic_operation(EAAddr,RegAddr,RegIndex,RegBase,1,0),
     RegBase != RegIndex,
     reg_def_use.def_used(EABase,RegBase,EAAddr,_),
-    reg_def_use.def_used(EAAddr,RegAddr,EALoad,_),
-    arch.memory_access("LOAD",EALoad,_,_,RegTarget,RegAddr,"NONE",1,0),
+    riscv_jump_table_address_use(EAAddr,RegAddr,EALoad,LoadAddrReg),
+    arch.memory_access("LOAD",EALoad,_,_,RegTarget,LoadAddrReg,"NONE",1,0),
     (
         instruction_get_operation(EALoad,"LW");
         instruction_get_operation(EALoad,"C.LW")
     ),
-    data_access(EALoad,_,_,RegAddr,"NONE",1,0,4),
+    data_access(EALoad,_,_,LoadAddrReg,"NONE",1,0,4),
     reg_def_use.def_used(EALoad,RegTarget,EAAdd,_),
     arch.reg_reg_arithmetic_operation(EAAdd,RegJump,RegTarget,RegBase,1,0),
     reg_def_use.def_used(EABase,RegBase,EAAdd,_),
@@ -1362,7 +1394,7 @@ riscv_scale_index_by_4_source(EASrli,Reg,Src):-
 // scaling into a new register.
 jump_table_max(TableStart,TableStart+as(Value,unsigned)*4):-
     riscv_relative_jump_table_access(_,TableStart,EALoad,RegScaled),
-    reg_def_use.def_used(EAAddr,RegAddr,EALoad,_),
+    riscv_jump_table_address_use(EAAddr,RegAddr,EALoad,_),
     arch.reg_reg_arithmetic_operation(EAAddr,RegAddr,RegScaled,_,1,0),
     reg_def_use.def_used(EAScale,RegScaled,EAAddr,_),
     riscv_scale_index_by_4_source(EAScale,RegScaled,RegSrc),
