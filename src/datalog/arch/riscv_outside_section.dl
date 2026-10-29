@@ -741,46 +741,12 @@ riscv_outside_call_read(Call,Reg):-
     riscv_outside_call_value(Call,Reg), riscv_outside_next(Call,Next),
     riscv_outside_future_read(Next,Reg).
 
-// Only the completed biased OUTSIDE value may be
-// incidental dead contents of an argument register. Unknown control paths
-// are not a deadness proof, and every post-call caller-saved explicit read
-// still refuses. This rule cannot admit an in-section or offset pointer.
 .decl riscv_outside_future_read(EA:address,Reg:register)
 riscv_outside_future_read(EA,Reg):-
     riscv_outside_reg_query(EA,Reg), basic_reg_def_use.used_explicit(EA,Reg,_).
 riscv_outside_future_read(EA,Reg):-
     riscv_outside_reg_query(EA,Reg), riscv_outside_next(EA,Next),
     !riscv_outside_kill(EA,Reg), riscv_outside_future_read(Next,Reg).
-.decl riscv_outside_future_unknown(EA:address,Reg:register)
-riscv_outside_future_unknown(EA,Reg):-
-    riscv_outside_reg_query(EA,Reg),
-    (
-        riscv_outside_bad_successor(EA,_);
-        arch.jump(EA), !arch.return(EA),
-            !riscv_outside_direct_jump(EA,_), !riscv_outside_table_target(EA,_);
-        !riscv_outside_next(EA,_), !arch.return(EA),
-            !riscv_outside_c_noreturn_plt_call(EA);
-        instruction_get_operation(EA,Operation),
-            (Operation = "ECALL"; Operation = "EBREAK"; Operation = "C.EBREAK")
-    ).
-riscv_outside_future_unknown(EA,Reg):-
-    riscv_outside_reg_query(EA,Reg), riscv_outside_next(EA,Next),
-    !riscv_outside_kill(EA,Reg), riscv_outside_future_unknown(Next,Reg).
-.decl riscv_outside_dead_range_nonzero(Hi:address,Lo:address,Def:address,Reg:register)
-riscv_outside_dead_range_nonzero(Hi,Lo,Def,Reg):-
-    riscv_outside_pointer_range(Hi,Lo,Def,Reg,Low,High),
-    (Low != 0; High != 0).
-.decl riscv_outside_dead_completed_call(Hi:address,Lo:address,EA:address,
-                                       Reg:register,Def:address)
-riscv_outside_dead_completed_call(Hi,Lo,EA,Reg,Def):-
-    riscv_outside_pointer_at(Hi,Lo,EA,Reg,Def),
-    riscv_outside_pointer_range(Hi,Lo,Def,Reg,0,0),
-    !riscv_outside_dead_range_nonzero(Hi,Lo,Def,Reg),
-    riscv_outside_section_candidate(Hi,Lo,_,_,_),
-    arch.call(EA,_), arch.lra_argument_register(Reg), arch.lra_caller_saved(Reg),
-    !basic_reg_def_use.used_explicit(EA,Reg,_),
-    !riscv_outside_future_read(EA,Reg), !riscv_outside_future_unknown(EA,Reg).
-
 .decl riscv_outside_callee_saved(Reg:register)
 riscv_outside_callee_saved("S0"). riscv_outside_callee_saved("S1").
 riscv_outside_callee_saved("S2"). riscv_outside_callee_saved("S3").
@@ -865,9 +831,9 @@ riscv_outside_section_refusal(Hi,Lo,EA,"pointer assigned to reserved register"):
     riscv_outside_pointer_def(Hi,Lo,EA,Reg),
     (arch.stack_pointer(Reg); Reg = "GP"; Reg = "TP"; Reg = "ZERO").
 riscv_outside_section_refusal(Hi,Lo,EA,"pointer passed to call"):-
-    riscv_outside_pointer_at(Hi,Lo,EA,Reg,Def),
-    arch.call(EA,_), arch.lra_argument_register(Reg),
-    !riscv_outside_dead_completed_call(Hi,Lo,EA,Reg,Def).
+    // Caller deadness does not prove that the callee ignores an argument.
+    riscv_outside_pointer_at(Hi,Lo,EA,Reg,_),
+    arch.call(EA,_), arch.lra_argument_register(Reg).
 riscv_outside_section_refusal(Hi,Lo,EA,"pointer returned to caller"):-
     riscv_outside_pointer_at(Hi,Lo,EA,Reg,_),
     arch.return(EA), arch.lra_return_register(Reg).
@@ -876,10 +842,9 @@ riscv_outside_section_refusal(Hi,Lo,EA,"unresolved branch"):-
     arch.jump(EA), !arch.return(EA), !riscv_outside_direct_jump(EA,_),
     !riscv_outside_table_target(EA,_).
 riscv_outside_section_refusal(Hi,Lo,EA,"unresolved call"):-
-    riscv_outside_pointer_at(Hi,Lo,EA,Reg,Def),
+    riscv_outside_pointer_at(Hi,Lo,EA,Reg,_),
     arch.call(EA,_), !riscv_outside_direct_call(EA,_),
-    !riscv_outside_preserved_call(EA,Reg),
-    !riscv_outside_dead_completed_call(Hi,Lo,EA,Reg,Def).
+    !riscv_outside_preserved_call(EA,Reg).
 riscv_outside_section_refusal(Hi,Lo,EA,"unmodeled system instruction"):-
     riscv_outside_pointer_at(Hi,Lo,EA,_,_),
     instruction_get_operation(EA,Operation),

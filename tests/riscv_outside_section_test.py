@@ -106,8 +106,8 @@ CASES = {
         "ld a0,-2015(s1)\n", False),
     "conditional_noncode_successor": (
         PREFIX + ".set lost,0x10800\nbeq a1,zero,lost\n" + ACCESS, False),
-    "completed_outside_argument_dead_at_call": (
-        PREFIX + ACCESS + "mv a4,s1\nli s1,0\njal ra,helper\nli a4,0\n", True),
+    "completed_outside_argument_dead_in_caller": (
+        PREFIX + ACCESS + "mv a4,s1\nli s1,0\njal ra,helper\nli a4,0\n", False),
     "completed_outside_argument_read_after_call": (
         PREFIX + ACCESS + "mv a4,s1\nli s1,0\njal ra,helper\n"
         "ld a0,-2016(a4)\nli a4,0\n", False),
@@ -260,6 +260,26 @@ class RiscvOutsideSectionTest(unittest.TestCase):
         self.run_command("strip", ["riscv64-linux-gnu-strip", "--strip-all",
                                     "-o", str(stripped), str(binary)])
         return (("original", binary), ("stripped", stripped))
+
+    def test_completed_argument_consumed_by_callee_refuses(self):
+        # Caller deadness cannot prove that the callee ignores a pointer.
+        # This helper derives an address in .rodata from the biased base;
+        # relocating that base to a .bss anchor would change its meaning.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            text = ("_start:\n.cfi_startproc\n" + PREFIX +
+                    "ld t2,-2016(s1)\nmv a4,s1\nli s1,0\n"
+                    "jal ra,helper\nli a4,0\nli a7,93\necall\n"
+                    ".cfi_endproc\nhelper:\n.cfi_startproc\n"
+                    "addi t0,a4,-2048\nli t1,-4096\nadd t0,t0,t1\n"
+                    "ld a0,0(t0)\nret\n.cfi_endproc\n")
+            for form, elf in self.compile_control_fixture(
+                    root, text, data_sections='\n.section .rodata,"a",@progbits\n.quad 77\n'):
+                with self.subTest(form=form):
+                    module, certificates, refusals = self.lift(root, elf, form)
+                    self.check_ir(module, False)
+                    self.assertFalse(certificates.strip())
+                    self.assertIn("pointer passed to call", refusals)
 
     def test_missing_dispatch_arm_at_known_predecessor_refuses(self):
         # Runtime unwind is the only region extent; the uncovered controls
