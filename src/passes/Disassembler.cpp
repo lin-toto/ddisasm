@@ -2012,16 +2012,15 @@ void performSanityChecks(AnalysisPassResult &Result, souffle::SouffleProgram &Pr
 {
     std::list<std::string> &Messages = ignoreErrors ? Result.Warnings : Result.Errors;
     // This is a relocation safety conflict, not an optional sanity warning.
-    if(auto Conflicts = Program.getRelation("riscv_legacy_memory_conflict"))
+    if(auto Conflicts = Program.getRelation("riscv_legacy_numeric_code_conflict"))
     {
         for(auto &Output : *Conflicts)
         {
-            uint64_t High, Low, Call;
-            std::string Reason;
-            Output >> High >> Low >> Call >> Reason;
+            uint64_t High, Low, Address;
+            Output >> High >> Low >> Address;
             std::stringstream Error;
-            Error << "unproved RISC-V legacy memory relocation at 0x" << std::hex << High
-                  << " -> 0x" << Low << " (call 0x" << Call << "): " << Reason
+            Error << "unproved RISC-V legacy relocation at 0x" << std::hex << High
+                  << " -> 0x" << Low << " (numeric operand 0x" << Address << ")"
                   << "; refusing numeric relocation fallback.";
             Result.Errors.push_back(Error.str());
         }

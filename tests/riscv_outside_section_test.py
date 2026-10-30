@@ -151,10 +151,15 @@ class RiscvOutsideSectionTest(unittest.TestCase):
     def lift(self, root, binary, form, extra_options=()):
         output = root / (form + ".gtirb")
         debug = root / (form + "-debug")
-        self.run_command("lift", ["ddisasm", str(binary), "--ir", str(output),
-                                  "--debug-dir", str(debug), "-j", "1",
-                                  *extra_options])
-        module = gtirb.IR.load_protobuf(output).modules[0]
+        result = subprocess.run(["ddisasm", str(binary), "--ir", str(output),
+                                 "--debug-dir", str(debug), "-j", "1",
+                                 *extra_options], capture_output=True,
+                                timeout=self.limits["lift"])
+        if result.returncode:
+            self.assertIn(b"refusing numeric relocation fallback", result.stderr)
+            module = None  # A hard refusal never supplies accepted IR.
+        else:
+            module = gtirb.IR.load_protobuf(output).modules[0]
         certificates = list(debug.rglob("riscv_outside_section_certificate.csv"))
         refusals = list(debug.rglob("riscv_outside_section_refusal.csv"))
         self.assertEqual(len(certificates), 1)
@@ -162,6 +167,9 @@ class RiscvOutsideSectionTest(unittest.TestCase):
         return module, certificates[0].read_text(), refusals[0].read_text()
 
     def check_ir(self, module, positive):
+        if module is None:
+            self.assertFalse(positive, "a positive proof must produce usable IR")
+            return None
         hi = None
         high_pc = None
         high_word = None
@@ -262,6 +270,75 @@ class RiscvOutsideSectionTest(unittest.TestCase):
                                     "-o", str(stripped), str(binary)])
         return (("original", binary), ("stripped", stripped))
 
+    def test_legacy_register_tm_clones_section_end(self):
+        text = ("_start:\n.type register_tm_clones,@function\nregister_tm_clones:\n"
+                ".cfi_startproc\nauipc a0,0x10\naddi a0,a0,256\n"
+                "auipc a5,0x10\naddi a5,a5,248\nsub a5,a5,a0\n"
+                "beqz a5,.Ldone\nli a0,0\n.Ldone: ret\n.cfi_endproc\n")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for form, binary in self.compile_control_fixture(root, text):
+                with self.subTest(form=form):
+                    output = root / (form + ".gtirb")
+                    result = subprocess.run(["ddisasm", str(binary), "--ir", str(output),
+                                             "-j", "1"], capture_output=True,
+                                            timeout=self.limits["lift"])
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    module = gtirb.IR.load_protobuf(output).modules[0]
+                    expressions = {i.address + off: expression
+                                   for i in module.byte_intervals if i.address is not None
+                                   for off, expression in i.symbolic_expressions.items()}
+                    for hi in (0x10000, 0x10008):
+                        high, low = expressions.get(hi), expressions.get(hi + 4)
+                        self.assertIsInstance(high, gtirb.SymAddrConst)
+                        self.assertIsInstance(low, gtirb.SymAddrConst)
+                        self.assertIn(gtirb.SymbolicExpression.Attribute.HI, high.attributes)
+                        self.assertIn(gtirb.SymbolicExpression.Attribute.LO, low.attributes)
+                        self.assertTrue(high.symbol.at_end)
+                        self.assertEqual(high.symbol.referent.address +
+                                         high.symbol.referent.size + high.offset, 0x20100)
+                        self.assertEqual(low.symbol.referent.address + low.offset, hi)
+
+    def test_legacy_adjacent_section_begin_stays_begin(self):
+        # .data ends exactly where .bss begins; an existing beginning-owned
+        # operand must not switch to the preceding section's end symbol.
+        text = ("_start: nop\nauipc t0,0x10\naddi a0,t0,-4\n"
+                "li t0,0\nli a7,93\necall\n")
+        data = (".data\n.space 12288\n.bss\n.globl adjacent_begin\n"
+                ".type adjacent_begin,@object\nadjacent_begin:\n.size adjacent_begin,256\n")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for form, binary in self.compile_control_fixture(root, text, frames=False,
+                                                               data_sections=data):
+                with self.subTest(form=form):
+                    output = root / (form + ".gtirb")
+                    result = subprocess.run(["ddisasm", str(binary), "--ir", str(output),
+                                             "-j", "1"], capture_output=True,
+                                            timeout=self.limits["lift"])
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    module = gtirb.IR.load_protobuf(output).modules[0]
+                    interval = next(i for i in module.byte_intervals
+                                    if i.address is not None and
+                                    i.address <= 0x10004 < i.address + i.size)
+                    high = interval.symbolic_expressions.get(0x10004 - interval.address)
+                    self.assertIsInstance(high, gtirb.SymAddrConst)
+                    self.assertFalse(high.symbol.at_end)
+                    self.assertEqual(high.symbol.referent.address + high.offset, 0x20000)
+
+    def test_legacy_noncall_numeric_pair_is_fatal(self):
+        text = ("_start:\n.cfi_startproc\nauipc t0,0x10\naddi s1,t0,8\n"
+                "xor t1,t0,a1\nli t0,0\nli a0,0\nli a7,93\necall\n.cfi_endproc\n")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for form, binary in self.compile_control_fixture(root, text):
+                with self.subTest(form=form):
+                    result = subprocess.run(["ddisasm", str(binary), "--ir",
+                        str(root / (form + ".gtirb")), "--ignore-errors",
+                        "--allow-ambiguous-data-pointers", "-j", "1"],
+                        capture_output=True, timeout=self.limits["lift"])
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(b"refusing numeric relocation fallback", result.stderr)
+
     def test_legacy_memory_pair_requires_raw_argument_nonuse(self):
         # Match LZ4's store through an AUIPC page left in an argument register.
         # A local callee that kills that input can retain the ordinary pair;
@@ -292,7 +369,7 @@ class RiscvOutsideSectionTest(unittest.TestCase):
                                                 timeout=self.limits["lift"])
                         if variant != "unused":
                             self.assertNotEqual(result.returncode, 0)
-                            self.assertIn(b"unproved RISC-V legacy memory relocation", result.stderr)
+                            self.assertIn(b"unproved RISC-V legacy relocation", result.stderr)
                             continue
                         self.assertEqual(result.returncode, 0, result.stderr)
                         module = gtirb.IR.load_protobuf(output).modules[0]
@@ -328,7 +405,7 @@ class RiscvOutsideSectionTest(unittest.TestCase):
                             capture_output=True, timeout=self.limits["lift"])
                         if not admitted:
                             self.assertNotEqual(result.returncode, 0)
-                            self.assertIn(b"unproved RISC-V legacy memory relocation", result.stderr)
+                            self.assertIn(b"unproved RISC-V legacy relocation", result.stderr)
                             continue
                         self.assertEqual(result.returncode, 0, result.stderr)
                         module = gtirb.IR.load_protobuf(output).modules[0]
@@ -597,7 +674,7 @@ class RiscvOutsideSectionTest(unittest.TestCase):
     def test_legacy_HI_group_with_hidden_outside_lower_refuses(self):
         # A missing arm can hide the outside ADDI from candidate discovery.
         # No outside certificate/refusal row is required for this legacy
-        # group: both inferred halves must stay raw independently of it.
+        # group: both inferred halves must hard-refuse independently of it.
         for variant in ("same_FDE", "uncovered", "cross_FDE", "copied_and_killed_cross_FDE",
                         "zero_ADDIW_copied_and_killed_cross_FDE",
                         "spilled_and_killed_cross_FDE", "raw_HI_call_argument", "raw_HI_return",
@@ -648,13 +725,16 @@ class RiscvOutsideSectionTest(unittest.TestCase):
                 summaries = []
                 for form, elf in self.compile_control_fixture(root, body, framed):
                     module, certificates, _ = self.lift(root, elf, form)
-                    upper_interval = next(i for i in module.byte_intervals
-                        if i.address is not None and i.address <= 0x10000 < i.address + i.size)
-                    upper = upper_interval.symbolic_expressions.get(0x10000 - upper_interval.address)
-                    lower = upper_interval.symbolic_expressions.get(0x10004 - upper_interval.address)
                     positive = variant in ("complete_region", "complete_memory_region", "dead_HI_before_unrelated_JR")
-                    self.assertEqual(isinstance(upper, gtirb.SymAddrConst), positive)
-                    self.assertEqual(isinstance(lower, gtirb.SymAddrConst), positive)
+                    if positive:
+                        self.assertIsNotNone(module)
+                        upper_interval = next(i for i in module.byte_intervals
+                            if i.address is not None and i.address <= 0x10000 < i.address + i.size)
+                        for pc in (0x10000, 0x10004):
+                            self.assertIsInstance(upper_interval.symbolic_expressions.get(
+                                pc - upper_interval.address), gtirb.SymAddrConst)
+                    else:
+                        self.assertIsNone(module)
                     self.assertFalse(certificates.strip())
                     candidate_csv = next((root / (form + "-debug")).rglob("riscv_outside_section_candidate.csv"))
                     self.assertFalse(candidate_csv.read_text().strip())
@@ -699,23 +779,7 @@ class RiscvOutsideSectionTest(unittest.TestCase):
                 summaries = []
                 for form, elf in self.compile_control_fixture(root, text):
                     module, certificates, _ = self.lift(root, elf, form)
-                    interval = next(i for i in module.byte_intervals if i.address is not None
-                        and i.address <= 0x10000 < i.address + i.size)
-                    def word(pc):
-                        offset = pc - interval.address
-                        return int.from_bytes(interval.contents[offset:offset + 4], "little")
-                    # .option norvc preserves these physical four-byte sites.
-                    # AUIPC's base is 0x20000, inside the single .bss interval.
-                    self.assertEqual(word(0x10000), 0x00010497)
-                    self.assertEqual(word(0x10004),
-                        0x0004829b if variant == "ADDIW_zero" else 0x00048293)
-                    self.assertEqual(word(0x10008), 0x00000493)  # li s1,0
-                    self.assertEqual(word(0x10010), 0x00030067)  # jr t1
-                    self.assertTrue(any(i.section.name == ".bss" and i.address is not None
-                        and i.address <= 0x20000 < i.address + i.size
-                        for i in module.byte_intervals))
-                    for pc in (0x10000, 0x10004):
-                        self.assertNotIn(pc - interval.address, interval.symbolic_expressions)
+                    self.assertIsNone(module)  # Numeric code is now a hard error.
                     self.assertFalse(certificates.strip())
                     candidate_csv = next((root / (form + "-debug")).rglob("riscv_outside_section_candidate.csv"))
                     self.assertFalse(candidate_csv.read_text().strip())
@@ -788,7 +852,7 @@ class RiscvOutsideSectionTest(unittest.TestCase):
 
     def test_rejected_equal_base_member_refuses_group(self):
         # Both completed ADDIs originally produce 0x207ff. The second upper
-        # has an unmatched memory use, so every dependent pair must stay raw.
+        # has an unmatched memory use, so every dependent pair must hard-refuse.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source, script, binary = root / "main.S", root / "link.ld", root / "main"
@@ -806,15 +870,7 @@ class RiscvOutsideSectionTest(unittest.TestCase):
                                         "-o", str(stripped), str(binary)])
             for form, elf in (("original", binary), ("stripped", stripped)):
                 module, certificates, refusals = self.lift(root, elf, form)
-                observed = []
-                for block in module.code_blocks:
-                    raw = block.byte_interval.contents[block.offset:block.offset + block.size]
-                    for index in range(0, len(raw), 4):
-                        if int.from_bytes(raw[index:index + 4], "little") & 0xfff == 0x497:
-                            observed.append(block.address + index)
-                            self.assertNotIn(block.offset + index,
-                                             block.byte_interval.symbolic_expressions)
-                self.assertEqual(sorted(observed), [0x10000, 0x10020])
+                self.assertIsNone(module)
                 self.assertFalse(certificates.strip())
                 self.assertIn("unmatched raw HI use", refusals)
                 self.assertIn("equal-base dependency refused", refusals)
@@ -865,12 +921,7 @@ class RiscvOutsideSectionTest(unittest.TestCase):
                                         "-o", str(stripped), str(binary)])
             for form, elf in (("original", binary), ("stripped", stripped)):
                 module, certificates, refusals = self.lift(root, elf, form)
-                self.check_ir(module, False)
-                for pc in (0x10000, 0x10004, 0x1000c):
-                    interval = next(interval for interval in module.byte_intervals
-                        if interval.address is not None and
-                        interval.address <= pc < interval.address + interval.size)
-                    self.assertNotIn(pc - interval.address, interval.symbolic_expressions)
+                self.assertIsNone(module)
                 self.assertFalse(certificates.strip())
                 self.assertIn("unmatched raw HI use", refusals)
 

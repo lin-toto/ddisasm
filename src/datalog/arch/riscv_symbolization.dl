@@ -885,8 +885,19 @@ riscv_outside_legacy_lower_exempt(Hi,Lo):-
     instruction_immediate_offset(Hi,1,_,_),
     (instruction_immediate_offset(Lo,Index,_,_);
      instruction_displacement_offset(Lo,Index,_,_)),
-    loaded_section(Beg,End,Name), Beg <= Target, Target < End,
+    loaded_section(Beg,End,Name), Beg <= Target, Target <= End,
     !section_property(Name,"ThreadLocal").
+
+// The same complete, unambiguous pair may name the exact loaded-section end.
+// Keep that boundary ownership on both halves; other raw-HI escapes still veto.
+boundary_sym_expr(Hi,Target,"legacy exact loaded section end"):-
+    riscv_outside_legacy_lower_exempt(Hi,Lo),
+    riscv_split_load(Hi,Lo,_,Target), loaded_section(_,Target,_),
+    !loaded_section(Target,_,_).
+boundary_sym_expr(Lo,Target,"legacy exact loaded section end"):-
+    riscv_outside_legacy_lower_exempt(Hi,Lo),
+    riscv_split_load(Hi,Lo,_,Target), loaded_section(_,Target,_),
+    !loaded_section(Target,_,_).
 
 // Refuse an unproved raw-value copy/escape at the original-register use,
 // before a physical kill can hide a copied alias or stack reload in another
@@ -1018,13 +1029,24 @@ riscv_outside_legacy_call_nonuse(Hi,Call,Reg):-
     arch.lra_argument_register(Reg), arch.lra_register(Reg,Index,_),
     arch.lra_register("A0",First,_), Index >= First + Arity.
 
-// A call that might consume the raw page conflicts with relocating an
-// otherwise certified memory pair. Do not silently export numeric operands.
-.decl riscv_legacy_memory_conflict(Hi:address,Lo:address,Call:address,Reason:symbol)
-.output riscv_legacy_memory_conflict
-riscv_legacy_memory_conflict(Hi,Lo,Call,"raw HI call input has no non-use proof"):-
-    riscv_outside_legacy_memory_pair(Hi,Lo),
-    riscv_outside_legacy_raw_hi_escape(Hi,Call,"raw HI passed as call argument").
+// Final-emission safety sink only: never feed this back into pair proofs.
+// The complete/dynamic ELF printer skips exactly these source sections.
+// This exception is a complete-consumer contract, not a static-policy claim.
+.decl riscv_legacy_printer_skipped(EA:address)
+riscv_legacy_printer_skipped(EA):-
+    loaded_section(Beg,End,Name),
+    (Name = ".plt"; Name = ".plt.sec"; Name = ".plt.got"),
+    final_code_in_refined_block(EA,_),
+    Beg <= EA, EA < End.
+.decl riscv_legacy_numeric_code_conflict(Hi:address,Lo:address,EA:address)
+.output riscv_legacy_numeric_code_conflict
+riscv_legacy_numeric_code_conflict(Hi,Lo,EA):-
+    riscv_outside_legacy_pair_blocked(Hi,Lo), (EA = Hi; EA = Lo),
+    final_code_in_refined_block(EA,_), !riscv_legacy_printer_skipped(EA),
+    (instruction_immediate_offset(EA,_,Offset,_);
+     instruction_displacement_offset(EA,_,Offset,_)),
+    !symbolic_expr(EA+Offset,_,_,_),
+    !symbolic_expr_symbol_minus_symbol(EA+Offset,_,_,_,_,_).
 
 // One physical HI is one relocation group. A genuine operand conflict on
 // one member cannot leave another inferred member relocating that same HI.
