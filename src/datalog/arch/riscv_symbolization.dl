@@ -898,11 +898,62 @@ riscv_outside_legacy_raw_hi_escape(Hi,EA,"unsymbolized raw HI explicit use"):-
 riscv_outside_legacy_raw_hi_escape(Hi,EA,"raw HI stored"):-
     riscv_outside_near_upper(Hi,Reg,_), riscv_outside_upper_walk(Hi,EA,Reg),
     arch.memory_access("STORE",EA,_,_,Reg,_,_,_,_).
+// A certified ordinary memory lower consumes the address without copying the
+// raw HI register. Its incidental presence in an ABI argument register is not
+// a use when an actual direct local callee proves that input dead at entry.
+// Keep completed outside pointers under their separate, stricter N01 rule.
+.decl riscv_outside_legacy_memory_pair(Hi:address,Lo:address)
+riscv_outside_legacy_memory_pair(Hi,Lo):-
+    riscv_outside_legacy_lower_exempt(Hi,Lo),
+    arch.memory_access(_,Lo,_,_,_,_,_,_,_),
+    riscv_split_load(Hi,Lo,_,Target),
+    loaded_section(Beg,End,Name), Beg <= Target, Target < End,
+    !special_data_section(Name).
+
+// Use only raw entry/decoder facts: CFG/LRA depends on symbolization and
+// cannot supply a negated proof here. This prefix proof deliberately stops
+// before any control transfer, trap, read, or instruction without DU facts.
+.decl riscv_legacy_prefix_read(EA:address,Reg:register)
+riscv_legacy_prefix_read(EA,Reg):- basic_reg_def_use.used(EA,Reg,_).
+riscv_legacy_prefix_read(EA,Reg):-
+    register_access(EA,Input,"R"), reg_map(Input,Reg).
+riscv_legacy_prefix_read(EA,Reg):-
+    instruction_get_src_op(EA,_,Op), op_regdirect_contains_reg(Op,Reg).
+
+.decl riscv_legacy_prefix_instruction(EA:address)
+riscv_legacy_prefix_instruction(EA):-
+    instruction_get_operation(EA,Operation),
+    (basic_reg_def_use.def(EA,_); basic_reg_def_use.used(EA,_,_)),
+    !arch.call(EA,_), !arch.jump(EA), !arch.return(EA),
+    Operation != "ECALL", Operation != "EBREAK", Operation != "C.EBREAK",
+    Operation != "UNIMP", Operation != "C.UNIMP".
+
+.decl riscv_legacy_prefix(Call:address,EA:address,Reg:register)
+riscv_legacy_prefix(Call,Target,Reg):-
+    riscv_outside_legacy_memory_pair(Hi,_), riscv_outside_near_upper(Hi,Reg,_),
+    riscv_outside_direct_call(Call,Target),
+    (fde_addresses(Target,ExtentEnd), ExtentEnd > Target;
+     defined_symbol(Target,_,"FUNC",_,_,Section,_,_,_), Section > 0),
+    loaded_section(Beg,End,Name), Beg <= Target, Target < End,
+    code_section(Name), !plt_section(Name), Name != ".iplt",
+    !defined_symbol(Target,_,_,"WEAK",_,_,_,_,_).
+riscv_legacy_prefix(Call,Next,Reg):-
+    riscv_legacy_prefix(Call,EA,Reg), riscv_legacy_prefix_instruction(EA),
+    !riscv_legacy_prefix_read(EA,Reg), !basic_reg_def_use.must_def(EA,Reg),
+    next(EA,Next).
+
+.decl riscv_outside_legacy_call_nonuse(Hi:address,Call:address,Reg:register)
+riscv_outside_legacy_call_nonuse(Hi,Call,Reg):-
+    riscv_outside_legacy_memory_pair(Hi,_), riscv_outside_near_upper(Hi,Reg,_),
+    riscv_legacy_prefix(Call,EA,Reg), riscv_legacy_prefix_instruction(EA),
+    !riscv_legacy_prefix_read(EA,Reg), basic_reg_def_use.must_def(EA,Reg).
+
 // Argument and result registers are implicit call/return operands. They
 // must be vetoed even if the decoded instruction has no explicit source read.
 riscv_outside_legacy_raw_hi_escape(Hi,EA,"raw HI passed as call argument"):-
     riscv_outside_near_upper(Hi,Reg,_), riscv_outside_upper_walk(Hi,EA,Reg),
-    arch.call(EA,_), arch.lra_argument_register(Reg).
+    arch.call(EA,_), arch.lra_argument_register(Reg),
+    !riscv_outside_legacy_call_nonuse(Hi,EA,Reg).
 riscv_outside_legacy_raw_hi_escape(Hi,EA,"raw HI returned to caller"):-
     riscv_outside_near_upper(Hi,Reg,_), riscv_outside_upper_walk(Hi,EA,Reg),
     arch.return(EA), arch.lra_return_register(Reg).
@@ -919,6 +970,14 @@ riscv_outside_legacy_pair_blocked(Hi,Lo):-
 riscv_outside_legacy_pair_blocked(Hi,Lo):-
     riscv_outside_section_candidate(OtherHi,Lo,_,_,_),
     riscv_outside_legacy_pair(Hi,Lo), Hi != OtherHi.
+// A call that might consume the raw page conflicts with relocating an
+// otherwise certified memory pair. Do not silently export numeric operands.
+.decl riscv_legacy_memory_conflict(Hi:address,Lo:address,Call:address,Reason:symbol)
+.output riscv_legacy_memory_conflict
+riscv_legacy_memory_conflict(Hi,Lo,Call,"raw HI call input has no non-use proof"):-
+    riscv_outside_legacy_memory_pair(Hi,Lo),
+    riscv_outside_legacy_raw_hi_escape(Hi,Call,"raw HI passed as call argument").
+
 // One physical HI is one relocation group. A genuine operand conflict on
 // one member cannot leave another inferred member relocating that same HI.
 riscv_outside_legacy_pair_blocked(Hi,Lo):-

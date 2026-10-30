@@ -241,7 +241,7 @@ class RiscvOutsideSectionTest(unittest.TestCase):
                 self.assertEqual(summaries[0], summaries[1])
 
 
-    def compile_control_fixture(self, root, text, frames=True, data_sections="", emit_relocations=False):
+    def compile_control_fixture(self, root, text, frames=True, data_sections="", emit_relocations=False, shared=False):
         source, script, binary = root / "main.S", root / "link.ld", root / "main"
         source.write_text(".option norvc\n.option norelax\n.text\n.globl _start\n" +
                           text + data_sections + "\n.bss\n.space 256\n")
@@ -249,8 +249,9 @@ class RiscvOutsideSectionTest(unittest.TestCase):
             ".data 0x1d000 : { *(.data) }\n"
             "  .eh_frame 0x1e000 : { *(.eh_frame) }\n"
             "  .rodata 0x1f000 : { *(.rodata) }\n  .bss 0x20000"))
+        link_mode = ["-shared"] if shared else ["-static", "-no-pie"]
         argv = ["riscv64-linux-gnu-gcc", "-march=rv64gc",
-            "-mabi=lp64", "-nostdlib", "-static", "-no-pie", "-g0",
+            "-mabi=lp64", "-nostdlib", *link_mode, "-g0",
             "-Wl,--no-relax,--build-id=none", "-T", str(script),
             str(source), "-o", str(binary)]
         if emit_relocations:
@@ -260,6 +261,49 @@ class RiscvOutsideSectionTest(unittest.TestCase):
         self.run_command("strip", ["riscv64-linux-gnu-strip", "--strip-all",
                                     "-o", str(stripped), str(binary)])
         return (("original", binary), ("stripped", stripped))
+
+    def test_legacy_memory_pair_requires_raw_argument_nonuse(self):
+        # Match LZ4's store through an AUIPC page left in an argument register.
+        # A local callee that kills that input can retain the ordinary pair;
+        # unknown calls and genuine raw-page consumers must fail the lift.
+        for variant in ("unused", "consumer", "read_write", "branch", "nested_call", "imported", "unknown"):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                call = ("jalr ra,t0,0" if variant == "unknown" else
+                        "call imported" if variant == "imported" else "jal ra,helper")
+                helper = {"consumer": "mv t0,a5\nld a0,0(t0)\n",
+                          "read_write": "add a5,a5,a2\nli a5,0\nli a0,0\n",
+                          "branch": "beqz a0,.Lkill\n.Lkill: li a5,0\nli a0,0\n",
+                          "nested_call": "jal ra,leaf\nli a5,0\nli a0,0\n"}.get(
+                              variant, ".option rvc\nc.mv a5,a2\n.option norvc\nli a0,0\n")
+                text = ("_start:\n.cfi_startproc\nauipc a5,0x10\n"
+                        "sw zero,8(a5)\n" + call + "\nli a5,0\nli a0,0\n"
+                        "li a7,93\necall\n.cfi_endproc\n"
+                        "helper:\n.cfi_startproc\n" + helper + "ret\n.cfi_endproc\n"
+                        "leaf:\n.cfi_startproc\nli a0,0\nret\n.cfi_endproc\n")
+                for form, binary in self.compile_control_fixture(root, text, shared=variant == "imported"):
+                    with self.subTest(variant=variant, form=form):
+                        output, debug = root / (form + ".gtirb"), root / (form + "-debug")
+                        command = ["ddisasm", str(binary), "--ir", str(output),
+                                   "--debug-dir", str(debug), "-j", "1"]
+                        if variant == "consumer":
+                            command += ["--ignore-errors", "--allow-ambiguous-data-pointers"]
+                        result = subprocess.run(command, capture_output=True,
+                                                timeout=self.limits["lift"])
+                        if variant != "unused":
+                            self.assertNotEqual(result.returncode, 0)
+                            self.assertIn(b"unproved RISC-V legacy memory relocation", result.stderr)
+                            continue
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        module = gtirb.IR.load_protobuf(output).modules[0]
+                        interval = next(i for i in module.byte_intervals
+                                        if i.address is not None and i.address <= 0x10000 < i.address + i.size)
+                        for address, attribute in ((0x10000, gtirb.SymbolicExpression.Attribute.HI),
+                                                   (0x10004, gtirb.SymbolicExpression.Attribute.LO)):
+                            expression = interval.symbolic_expressions.get(address - interval.address)
+                            self.assertIsInstance(expression, gtirb.SymAddrConst)
+                            self.assertIn(attribute, expression.attributes)
+                            self.assertIn(gtirb.SymbolicExpression.Attribute.PCREL, expression.attributes)
 
     def test_completed_argument_consumed_by_callee_refuses(self):
         # Caller deadness cannot prove that the callee ignores a pointer.
