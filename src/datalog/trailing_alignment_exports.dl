@@ -318,12 +318,11 @@ riscv_trailing_alignment_refusal(Begin,End,"conflicting preceding function owner
     riscv_alignment_predecessor_owner(Begin,End,Function),
     riscv_alignment_predecessor_owner(Begin,End,Other), Function != Other.
 
-// An unresolved non-return transfer within the preceding function is
-// gap-specific unknown evidence. Unrelated module-level top edges are not a
-// veto: a positive candidate/reference naming the gap is checked above.
-riscv_trailing_alignment_refusal(Begin,End,"unresolved preceding-function transfer",Source):-
-    riscv_alignment_predecessor_owner(Begin,End,Function),
-    function_inference.in_function(Source,Function),
+// An unresolved non-return transfer can enter the gap from any function.
+// Function ownership does not exclude an incoming computed target: without
+// a target exclusion proof, retain the provisional code conservatively.
+riscv_trailing_alignment_refusal(Begin,End,"unresolved transfer",Source):-
+    riscv_trailing_alignment_candidate(_,_,Begin,End,_),
     cfg_edge_to_top(Source,_,Type), (Type = "branch"; Type = "call").
 
 .decl riscv_trailing_alignment_padding(Begin:address,Size:unsigned)

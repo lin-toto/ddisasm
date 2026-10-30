@@ -84,9 +84,20 @@ _start:
        entry trap; the linker preserves all four zero bytes. */
     .2byte 0
 #endif
+#if CASE == 16
+    /* The loaded displacement reaches the real trap before this function,
+       but the provisional CFG cannot resolve this computed transfer. */
+1:  auipc t0,%pcrel_hi(_start)
+    addi t0,t0,%pcrel_lo(1b)
+2:  auipc t1,%pcrel_hi(displacement)
+    lw t1,%pcrel_lo(2b)(t1)
+    add t0,t0,t1
+    jalr zero,t0,0
+#else
     addi a0,zero,0
     addi a7,zero,93
     ecall
+#endif
 #if CASE != 5
 #if !NO_UNWIND
     .cfi_endproc
@@ -109,8 +120,8 @@ _start:
 #endif
 
 #if CASE == 9
-    /* This unrelated function's unresolved branch must remain in the
-       provisional graph without vetoing the gap after main. */
+    /* Without a target exclusion proof, this function's unresolved branch
+       can enter the gap after main and must veto its removal. */
     .section .other,"ax",@progbits
     .balign 4,0
     .globl unrelated
@@ -120,6 +131,13 @@ unrelated:
     jalr zero,t1,0
     .cfi_endproc
     .size unrelated,.-unrelated
+#endif
+
+#if CASE == 16
+    .data
+    .balign 4,0
+displacement:
+    .word -2
 #endif
 
 #if CASE == 10

@@ -174,8 +174,11 @@ class RiscvTrailingAlignmentTest(unittest.TestCase):
         # retains a real zero/C.UNIMP entry; binary ambiguity must refuse both.
         self._case(64, 12, False, False)
 
-    def test_unrelated_unresolved_branch_is_retained_without_veto(self):
-        self._case(64, 9, True, True)
+    def test_unresolved_branch_outside_preceding_function_refuses(self):
+        self._case(64, 9, False, False)
+
+    def test_loaded_displacement_into_gap_refuses(self):
+        self._case(64, 16, False, False)
 
     def test_mixed_fill_is_refused_and_larger_zero_gap_is_preserved(self):
         self._case(64, 6, False, False)
