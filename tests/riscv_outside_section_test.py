@@ -305,6 +305,42 @@ class RiscvOutsideSectionTest(unittest.TestCase):
                             self.assertIn(attribute, expression.attributes)
                             self.assertIn(gtirb.SymbolicExpression.Attribute.PCREL, expression.attributes)
 
+    def test_legacy_memory_imports_require_fixed_prototype_nonuse(self):
+        for name, register, admitted, local in (("strcmp", "a4", True, False),
+                ("strcmp", "a1", False, False), ("unlisted", "a4", False, False),
+                ("printf", "a4", False, False), ("strcmp", "a4", False, True),
+                ("fclose", "a5", True, False), ("fclose", "a0", False, False),
+                ("fclose", "a5", False, True)):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                call = "jal ra," + name if local else "call " + name
+                text = (".type " + name + ",@function\n_start:\n.cfi_startproc\n"
+                        "auipc " + register + ",0x10\nsw zero,8(" + register + ")\n" +
+                        call + "\nli " + register + ",0\nli a0,0\nli a7,93\necall\n.cfi_endproc\n")
+                if local:
+                    text += (".local " + name + "\n" + name + ":\n.cfi_startproc\n"
+                             "mv t0," + register + "\nld a0,0(t0)\nret\n.cfi_endproc\n")
+                for form, binary in self.compile_control_fixture(root, text, shared=not local):
+                    with self.subTest(name=name, register=register, local=local, form=form):
+                        output = root / (form + ".gtirb")
+                        result = subprocess.run(["ddisasm", str(binary), "--ir", str(output),
+                            "--debug-dir", str(root / (form + "-debug")), "-j", "1"],
+                            capture_output=True, timeout=self.limits["lift"])
+                        if not admitted:
+                            self.assertNotEqual(result.returncode, 0)
+                            self.assertIn(b"unproved RISC-V legacy memory relocation", result.stderr)
+                            continue
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        module = gtirb.IR.load_protobuf(output).modules[0]
+                        interval = next(i for i in module.byte_intervals if i.address is not None
+                                        and i.address <= 0x10000 < i.address + i.size)
+                        for address, attribute in ((0x10000, gtirb.SymbolicExpression.Attribute.HI),
+                                                   (0x10004, gtirb.SymbolicExpression.Attribute.LO)):
+                            expression = interval.symbolic_expressions.get(address - interval.address)
+                            self.assertIsInstance(expression, gtirb.SymAddrConst)
+                            self.assertIn(attribute, expression.attributes)
+                            self.assertIn(gtirb.SymbolicExpression.Attribute.PCREL, expression.attributes)
+
     def test_completed_argument_consumed_by_callee_refuses(self):
         # Caller deadness cannot prove that the callee ignores a pointer.
         # This helper derives an address in .rodata from the biased base;

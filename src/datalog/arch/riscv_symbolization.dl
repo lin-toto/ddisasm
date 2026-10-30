@@ -970,6 +970,54 @@ riscv_outside_legacy_pair_blocked(Hi,Lo):-
 riscv_outside_legacy_pair_blocked(Hi,Lo):-
     riscv_outside_section_candidate(OtherHi,Lo,_,_,_),
     riscv_outside_legacy_pair(Hi,Lo), Hi != OtherHi.
+// Fixed C11 string/memory and single-FILE* prototypes constrain only proved PLT imports.
+// Defined functions with these names, variadic functions and unlisted imports
+// receive no summary. This does not relax completed outside-pointer escapes.
+.decl riscv_legacy_import_arity(Name:symbol,Arity:unsigned)
+riscv_legacy_import_arity("memcpy",3).
+riscv_legacy_import_arity("memmove",3).
+riscv_legacy_import_arity("memset",3).
+riscv_legacy_import_arity("memcmp",3).
+riscv_legacy_import_arity("memchr",3).
+riscv_legacy_import_arity("strcmp",2).
+riscv_legacy_import_arity("strcoll",2).
+riscv_legacy_import_arity("strcpy",2).
+riscv_legacy_import_arity("strcat",2).
+riscv_legacy_import_arity("strchr",2).
+riscv_legacy_import_arity("strrchr",2).
+riscv_legacy_import_arity("strspn",2).
+riscv_legacy_import_arity("strcspn",2).
+riscv_legacy_import_arity("strpbrk",2).
+riscv_legacy_import_arity("strstr",2).
+riscv_legacy_import_arity("strtok",2).
+riscv_legacy_import_arity("strncmp",3).
+riscv_legacy_import_arity("strncpy",3).
+riscv_legacy_import_arity("strncat",3).
+riscv_legacy_import_arity("strxfrm",3).
+riscv_legacy_import_arity("strlen",1).
+riscv_legacy_import_arity("strerror",1).
+riscv_legacy_import_arity("fclose",1).
+riscv_legacy_import_arity("fflush",1).
+riscv_legacy_import_arity("feof",1).
+riscv_legacy_import_arity("ferror",1).
+riscv_legacy_import_arity("clearerr",1).
+riscv_legacy_import_arity("rewind",1).
+riscv_legacy_import_arity("ftell",1).
+riscv_legacy_import_arity("fgetc",1).
+riscv_legacy_import_arity("getc",1).
+
+riscv_outside_legacy_call_nonuse(Hi,Call,Reg):-
+    riscv_outside_legacy_memory_pair(Hi,_), riscv_outside_near_upper(Hi,Reg,_),
+    (riscv_outside_direct_call(Call,Target);
+     riscv_outside_far_control_target(Call,Target), arch.call(Call,_)),
+    plt_block(Target,Import),
+    symbol(_,_,"FUNC",_,_,0,".dynsym",_,Import),
+    riscv_legacy_import_arity(Name,Arity),
+    // @number is the loader's canonical ELF version-ID spelling.
+    (Import = Name; match(cat(Name,"@(GLIBC_[0-9.]+|[0-9]+)"),Import)),
+    arch.lra_argument_register(Reg), arch.lra_register(Reg,Index,_),
+    arch.lra_register("A0",First,_), Index >= First + Arity.
+
 // A call that might consume the raw page conflicts with relocating an
 // otherwise certified memory pair. Do not silently export numeric operands.
 .decl riscv_legacy_memory_conflict(Hi:address,Lo:address,Call:address,Reason:symbol)
