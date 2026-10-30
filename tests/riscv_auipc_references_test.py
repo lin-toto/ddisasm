@@ -75,7 +75,18 @@ value: .word 7,9
                         result = subprocess.run([
                             "ddisasm", str(binary), "--ir", str(output), "-j", "1",
                             *self.disassembly_options,
-                        ], check=True, capture_output=True, text=True)
+                        ], capture_output=True, text=True)
+                        if bits == 64 and ambiguity != "none":
+                            # Both ambiguous endpoints remain genuinely numeric;
+                            # the final-emission policy now refuses their IR.
+                            self.assertEqual(result.returncode, 1)
+                            self.assertIn("refusing numeric relocation fallback", result.stderr)
+                            reason = ("multiple completed addresses" if ambiguity == "addresses"
+                                      else "multiple reaching definitions")
+                            self.assertIn("unresolved RISC-V AUIPC pair", result.stderr)
+                            self.assertIn(reason, result.stderr)
+                            continue
+                        self.assertEqual(result.returncode, 0, result.stderr)
                         module = gtirb.IR.load_protobuf(output).modules[0]
                         diagnostics = module.aux_data["riscvUnresolvedPcrelReferences"].data
                         block = next(module.symbols_named("_start")).referent
@@ -94,6 +105,50 @@ value: .word 7,9
                             self.assertIsInstance(high, gtirb.SymAddrConst)
                             self.assertNotIn("unresolved RISC-V AUIPC pair", result.stderr)
                             self.assertEqual(diagnostics, [])
+
+    @unittest.skipUnless(all(shutil.which(tool) for tool in
+                         ("riscv64-linux-gnu-gcc", "gtirb-pprinter", "qemu-riscv64")),
+                         "RISC-V compiler, printer and QEMU required")
+    def test_direct_call_relocates_across_guarded_padding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "call.S"
+            source.write_text(".option norvc\n.option norelax\n.text\n"
+                ".globl _start,callee\n.type _start,@function\n_start: call callee\n"
+                "li a7,93\necall\n.size _start,.-_start\n.type callee,@function\n"
+                "callee: li a0,7\nret\n.size callee,.-callee\n"
+                ".section .note.GNU-stack,\"\",@progbits\n")
+            cc = ["riscv64-linux-gnu-gcc", "-march=rv64imac", "-mabi=lp64",
+                  "-nostdlib", "-static", "-no-pie", "-Wl,--no-relax,--build-id=none"]
+            subprocess.run([*cc, str(source), "-o", str(root / "input")],
+                           check=True, capture_output=True, timeout=30)
+            subprocess.run(["ddisasm", str(root / "input"), "--ir",
+                            str(root / "input.gtirb"), "-j", "1"],
+                           check=True, capture_output=True, timeout=120)
+            subprocess.run(["gtirb-pprinter", "--ir", str(root / "input.gtirb"),
+                            "--asm", str(root / "output.S"), "--policy", "complete"],
+                           check=True, capture_output=True, timeout=30)
+            printed = (root / "output.S").read_text()
+            self.assertEqual(printed.count("\ncallee:\n"), 1)
+            # An old numeric call must hit an illegal instruction, not slide
+            # through NOPs into the moved callee and falsely pass the test.
+            printed = printed.replace("\ncallee:\n",
+                "\n.word 0\n.space 4092,0\ncallee:\n", 1)
+            (root / "output.S").write_text(printed)
+            subprocess.run([*cc, str(root / "output.S"), "-o", str(root / "output"),
+                            "-Wl,--section-start=.text=0x500000"],
+                           check=True, capture_output=True, timeout=30)
+            result = subprocess.run(["qemu-riscv64", str(root / "output")],
+                                    capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 7)
+            module = gtirb.IR.load_protobuf(root / "input.gtirb").modules[0]
+            entry = next(module.symbols_named("_start")).referent
+            for offset, attribute in ((0, gtirb.SymbolicExpression.Attribute.HI),
+                                      (4, gtirb.SymbolicExpression.Attribute.LO)):
+                expression = entry.byte_interval.symbolic_expressions.get(entry.offset + offset)
+                self.assertIsInstance(expression, gtirb.SymAddrConst)
+                self.assertIn(attribute, expression.attributes)
+                self.assertIn(gtirb.SymbolicExpression.Attribute.PCREL, expression.attributes)
 
     @unittest.skipUnless(shutil.which("riscv64-linux-gnu-gcc"), "RISC-V compiler required")
     def test_plt_load_names_instruction_not_external_symbol(self):

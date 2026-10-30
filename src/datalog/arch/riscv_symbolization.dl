@@ -888,6 +888,17 @@ riscv_outside_legacy_lower_exempt(Hi,Lo):-
     loaded_section(Beg,End,Name), Beg <= Target, Target <= End,
     !section_property(Name,"ThreadLocal").
 
+// A decoded direct call consumes its own complete PC-relative upper/lower.
+// Exempt only that matching JALR read; all other escape vetoes still apply.
+riscv_outside_legacy_lower_exempt(Hi,Lo):-
+    riscv_pcrel_control_transfer(Hi,Lo,Index,Target),
+    direct_call(Lo,Target), code_in_block(Target,Target),
+    riscv_auipc(Hi,Reg,_), instruction_get_operation(Lo,"JALR"),
+    instruction_get_op(Lo,1,Op), op_regdirect_contains_reg(Op,Reg),
+    !riscv_ambiguous_split_hi(Hi),
+    instruction_immediate_offset(Hi,1,_,_),
+    instruction_immediate_offset(Lo,Index,_,_).
+
 // The same complete, unambiguous pair may name the exact loaded-section end.
 // Keep that boundary ownership on both halves; other raw-HI escapes still veto.
 boundary_sym_expr(Hi,Target,"legacy exact loaded section end"):-
@@ -1038,15 +1049,24 @@ riscv_legacy_printer_skipped(EA):-
     (Name = ".plt"; Name = ".plt.sec"; Name = ".plt.got"),
     final_code_in_refined_block(EA,_),
     Beg <= EA, EA < End.
+// Key refusal on actual final exported expressions, including whole-instruction
+// forms. A structural transfer fact alone is never evidence of emission.
+.decl riscv_legacy_exported_operand(EA:address)
+riscv_legacy_exported_operand(EA):-
+    (riscv_outside_legacy_pair_blocked(EA,_);
+     riscv_outside_legacy_pair_blocked(_,EA)),
+    (Offset = 0; instruction_immediate_offset(EA,_,Offset,_);
+     instruction_displacement_offset(EA,_,Offset,_)),
+    (symbolic_expr(EA+Offset,_,_,_);
+     symbolic_expr_symbol_minus_symbol(EA+Offset,_,_,_,_,_)).
 .decl riscv_legacy_numeric_code_conflict(Hi:address,Lo:address,EA:address)
 .output riscv_legacy_numeric_code_conflict
 riscv_legacy_numeric_code_conflict(Hi,Lo,EA):-
     riscv_outside_legacy_pair_blocked(Hi,Lo), (EA = Hi; EA = Lo),
     final_code_in_refined_block(EA,_), !riscv_legacy_printer_skipped(EA),
-    (instruction_immediate_offset(EA,_,Offset,_);
-     instruction_displacement_offset(EA,_,Offset,_)),
-    !symbolic_expr(EA+Offset,_,_,_),
-    !symbolic_expr_symbol_minus_symbol(EA+Offset,_,_,_,_,_).
+    (instruction_immediate_offset(EA,_,_,_);
+     instruction_displacement_offset(EA,_,_,_)),
+    !riscv_legacy_exported_operand(Hi), !riscv_legacy_exported_operand(Lo).
 
 // One physical HI is one relocation group. A genuine operand conflict on
 // one member cannot leave another inferred member relocating that same HI.
