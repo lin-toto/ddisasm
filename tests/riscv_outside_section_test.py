@@ -387,7 +387,7 @@ class RiscvOutsideSectionTest(unittest.TestCase):
                 ("strcmp", "a1", False, False), ("unlisted", "a4", False, False),
                 ("printf", "a4", False, False), ("strcmp", "a4", False, True),
                 ("fclose", "a5", True, False), ("fclose", "a0", False, False),
-                ("fclose", "a5", False, True)):
+                ("fclose", "a5", False, True), ("__sysv_signal", "a5", True, False)):
             with tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 call = "jal ra," + name if local else "call " + name

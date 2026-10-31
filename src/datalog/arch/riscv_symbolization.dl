@@ -1027,6 +1027,10 @@ riscv_legacy_import_arity("rewind",1).
 riscv_legacy_import_arity("ftell",1).
 riscv_legacy_import_arity("fgetc",1).
 riscv_legacy_import_arity("getc",1).
+riscv_legacy_import_arity("__sysv_signal",2).
+riscv_legacy_import_arity("signal",2).
+riscv_legacy_import_arity("pthread_mutex_destroy",1).
+riscv_legacy_import_arity("fwrite",4).
 
 riscv_outside_legacy_call_nonuse(Hi,Call,Reg):-
     riscv_outside_legacy_memory_pair(Hi,_), riscv_outside_near_upper(Hi,Reg,_),
