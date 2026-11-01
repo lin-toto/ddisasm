@@ -180,7 +180,8 @@ riscv_outside_far_control_target(Lo,Target):-
 // relation is not a complete target proof, even if named direct_call/jump.
 .decl riscv_outside_early_expected_next(EA:address,Next:address)
 riscv_outside_early_expected_next(EA,Next):-
-    riscv_outside_upper_enabled(), may_fallthrough(EA,Next), code(EA).
+    riscv_outside_upper_enabled(), may_fallthrough(EA,Next), code(EA),
+    !riscv_outside_c_noreturn_plt_call(EA).
 // Retain every call continuation except a direct, dynamically JUMP_SLOT-bound
 // PLT call to C exit, also confirmed by DDisasm's own refined noreturn fact.
 // ISO C 7.22.4.4 specifies that exit cannot return. This is the same dynamic

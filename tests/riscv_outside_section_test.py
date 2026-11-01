@@ -148,6 +148,63 @@ class RiscvOutsideSectionTest(unittest.TestCase):
         subprocess.run(argv, check=True, capture_output=True,
                        timeout=self.limits[phase])
 
+    def test_certified_exit_has_no_fallthrough(self):
+        """Both early edge rules must honor the same dynamic exit certificate."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, binary = root / "main.S", root / "main"
+            source.write_text("""
+.option norvc
+.option norelax
+.text
+.globl _start
+_start:
+beqz a2,exit_next
+.Lhi: auipc s1,%pcrel_hi(biased)
+addi s1,s1,%pcrel_lo(.Lhi)
+ld a0,-480(s1)
+li s1,0
+.globl returning_call, returning_next, exit_call, exit_next
+returning_call:
+.option relax
+call puts
+.option norelax
+returning_next: li a0,0
+exit_call:
+.option relax
+call exit
+.option norelax
+exit_next: li a0,1
+ret
+.bss
+.balign 8
+.space 256
+.set biased,.+256
+""")
+            self.run_command("compile", ["riscv64-linux-gnu-gcc",
+                "-nostartfiles", "-pie", "-Wl,--build-id=none",
+                str(source), "-o", str(binary)])
+            self.lift(root, binary, "noreturn")
+            debug = root / "noreturn-debug" / "disassembly"
+            symbols = {}
+            for line in subprocess.check_output(
+                    ["riscv64-linux-gnu-nm", "-n", str(binary)], text=True).splitlines():
+                fields = line.split()
+                if len(fields) == 3:
+                    symbols[fields[2]] = int(fields[0], 16)
+            def rows(name):
+                return {tuple(int(value, 0) for value in row)
+                        for row in csv.reader((debug / (name + ".csv")).read_text().splitlines(),
+                                              delimiter="\t")}
+            exit_call = symbols["exit_call"]
+            self.assertIn((exit_call,), rows("riscv_outside_c_noreturn_plt_call"))
+            for relation in ("riscv_outside_early_expected_next",
+                             "riscv_outside_expected_next", "riscv_outside_next"):
+                edges = rows(relation)
+                self.assertFalse({edge for edge in edges if edge[0] == exit_call})
+                self.assertIn((symbols["returning_call"], symbols["returning_next"]),
+                              edges)
+
     def lift(self, root, binary, form, extra_options=()):
         output = root / (form + ".gtirb")
         debug = root / (form + "-debug")
