@@ -95,5 +95,6 @@ void DisassemblyPass::transformImpl(AnalysisPassResult& Result, gtirb::Context& 
         return;
 
     disassembleModule(Context, Module, *Program, SelfDiagnose);
+    checkRiscvOutsideGuesses(Result, Module, *Program);
     performSanityChecks(Result, *Program, SelfDiagnose, IgnoreErrors);
 }

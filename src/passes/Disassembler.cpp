@@ -2007,6 +2007,105 @@ void checkAmbiguousDataPointers(AnalysisPassResult &Result, souffle::SouffleProg
     Messages.push_back(Message.str());
 }
 
+// Validate the constructed IR as well as the Datalog export. This remains
+// fatal under --ignore-errors: an override must never leave numeric operands.
+void checkRiscvOutsideGuesses(AnalysisPassResult &Result, gtirb::Module &Module,
+                            souffle::SouffleProgram &Program)
+{
+    auto *Guesses = Program.getRelation("riscv_outside_guess");
+    if(!Guesses || Guesses->size() == 0)
+        return;
+    using Pair = std::pair<uint64_t, uint64_t>;
+    using Sites = std::set<std::pair<uint64_t, std::string>>;
+    std::map<Pair, Sites> Waived, Errors;
+    for(auto &Row : *Program.getRelation("riscv_outside_guess_warning"))
+    {
+        uint64_t High, Low, EA;
+        std::string Reason;
+        Row >> High >> Low >> EA >> Reason;
+        Waived[{High, Low}].emplace(EA, Reason);
+    }
+    for(auto &Row : *Program.getRelation("riscv_outside_guess_emission_error"))
+    {
+        uint64_t High, Low, EA;
+        std::string Reason;
+        Row >> High >> Low >> EA >> Reason;
+        Errors[{High, Low}].emplace(EA, Reason);
+    }
+    auto ExpressionAt = [&](uint64_t EA) -> const gtirb::SymAddrConst * {
+        const gtirb::SymAddrConst *Found = nullptr;
+        for(auto &Interval : Module.findByteIntervalsOn(gtirb::Addr(EA)))
+        {
+            auto Offset = EA - static_cast<uint64_t>(*Interval.getAddress());
+            auto *Expression = Interval.getSymbolicExpression(Offset);
+            auto *Sizes = Module.getAuxData<gtirb::schema::SymbolicExpressionSizes>();
+            auto Key = gtirb::Offset(Interval.getUUID(), Offset);
+            if(!Expression || !Sizes || !Sizes->count(Key) || Sizes->at(Key) != 4 || Found)
+                return nullptr;
+            Found = std::get_if<gtirb::SymAddrConst>(Expression);
+            if(!Found)
+                return nullptr;
+        }
+        return Found;
+    };
+    for(auto &Row : *Guesses)
+    {
+        uint64_t High, Low, Index, Target, Begin, End;
+        std::string Section, Name;
+        Row >> High >> Low >> Index >> Target >> Begin >> End >> Section >> Name;
+        Pair Key{High, Low};
+        int64_t Addend = static_cast<int64_t>(Target - Begin);
+        auto *H = ExpressionAt(High);
+        auto *L = ExpressionAt(Low);
+        auto *Data = H && H->Sym ? H->Sym->getReferent<gtirb::DataBlock>() : nullptr;
+        auto *Code = L && L->Sym ? L->Sym->getReferent<gtirb::CodeBlock>() : nullptr;
+        auto *Interval = Data ? Data->getByteInterval() : nullptr;
+        std::stringstream LowName;
+        LowName << ".L_pcrel_" << std::hex << High;
+        bool Valid = H && L && Data && Code && Interval
+                     && H->Attributes == gtirb::SymAttributeSet{gtirb::SymAttribute::PCREL,
+                                                               gtirb::SymAttribute::HI}
+                     && L->Attributes == gtirb::SymAttributeSet{gtirb::SymAttribute::PCREL,
+                                                               gtirb::SymAttribute::LO}
+                     && H->Offset == Addend && L->Offset == 0
+                     && H->Sym->getName() == Name && L->Sym->getName() == LowName.str()
+                     && !H->Sym->getAtEnd() && !L->Sym->getAtEnd()
+                     && Data->getAddress() == gtirb::Addr(Begin)
+                     && Code->getAddress() == gtirb::Addr(High) && Code->getSize() >= 4
+                     && Interval->getAddress() == gtirb::Addr(Begin)
+                     && Interval->getSize() == End - Begin
+                     && Interval->getSection() && Interval->getSection()->getName() == Section
+                     && !Module.findCodeBlocksOn(gtirb::Addr(Low)).empty();
+        if(!Valid)
+            Errors[Key].emplace(High, "constructed IR does not retain the intended HI/LO pair and interval");
+        if(Waived[Key].empty())
+            Errors[Key].emplace(High, "missing waived proof evidence");
+        if(!Errors[Key].empty())
+        {
+            std::stringstream Error;
+            Error << "invalid RISC-V outside-section override at HI 0x" << std::hex << High
+                  << " -> LO 0x" << Low << "; refusing numeric relocation fallback:";
+            for(const auto &[EA, Reason] : Errors[Key])
+                Error << " 0x" << EA << " (" << Reason << ")";
+            Result.Errors.push_back(Error.str());
+            continue;
+        }
+        std::stringstream Warning;
+        Warning << "Guessing RISC-V outside-section data base at HI 0x" << std::hex << High
+                << " -> LO 0x" << Low << ": original 0x" << Target << " = " << Section
+                << "[0x" << Begin << ",0x" << End << ") start + 0x" << Addend
+                << " (0x" << Target - End << " past end); emitting " << Name << " + 0x"
+                << Addend << " with --allow-ambiguous-data-pointers. Assumptions: adjacent "
+                   "HI/LO execute together and all derived data accesses move with this "
+                   "byte interval. Waived proof sites:";
+        for(const auto &[EA, Reason] : Waived[Key])
+            Warning << " 0x" << EA << " (" << Reason << ")";
+        Warning << ". Wrong section/provenance or changed internal offsets can silently "
+                   "corrupt data or crash.";
+        Result.Warnings.push_back(Warning.str());
+    }
+}
+
 void performSanityChecks(AnalysisPassResult &Result, souffle::SouffleProgram &Program,
                          bool selfDiagnose, bool ignoreErrors)
 {

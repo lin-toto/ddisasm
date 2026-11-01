@@ -1058,14 +1058,16 @@ riscv_outside_section_certificate(Hi,Lo,Index,Target,Anchor,Name,SymbolName):-
     HiName = cat(".L_pcrel_",@to_string_hex(Hi)),
     !symbol(_,_,_,_,_,_,_,_,HiName).
 
+#include "riscv_outside_guess.dl"
+
 inferred_symbol(Anchor,Name,"LOCAL","DEFAULT","OBJECT","Beg"):-
-    riscv_outside_section_certificate(_,_,_,_,Anchor,_,Name).
+    riscv_outside_emission(_,_,_,_,Anchor,_,Name).
 labeled_ea(Anchor):-
-    riscv_outside_section_certificate(_,_,_,_,Anchor,_,_).
+    riscv_outside_emission(_,_,_,_,Anchor,_,_).
 
 .decl riscv_outside_hi_symbol(Hi:address,Name:symbol)
 riscv_outside_hi_symbol(Hi,Name):-
-    riscv_outside_section_certificate(Hi,_,_,_,_,_,_),
+    riscv_outside_emission(Hi,_,_,_,_,_,_),
     Name = cat(".L_pcrel_",@to_string_hex(Hi)).
 inferred_symbol(Hi,Name,"LOCAL","DEFAULT","NONE","Beg"):-
     riscv_outside_hi_symbol(Hi,Name).
@@ -1081,18 +1083,18 @@ custom_symbolic_expr_operand(Lo,Index):-
 
 symbolic_expr(Hi+Offset,Size,Name,Addend),
 symbolic_expr_symbol_address(Hi+Offset,1,Name,Anchor):-
-    riscv_outside_section_certificate(Hi,_,_,Target,Anchor,_,Name),
+    riscv_outside_emission(Hi,_,_,Target,Anchor,_,Name),
     instruction_immediate_offset(Hi,1,Offset,Size),
     Addend = as(Target,number)-as(Anchor,number).
 symbolic_expr(Lo+Offset,Size,Name,0),
 symbolic_expr_symbol_address(Lo+Offset,1,Name,Hi):-
-    riscv_outside_section_certificate(Hi,Lo,Index,_,_,_,_),
+    riscv_outside_emission(Hi,Lo,Index,_,_,_,_),
     riscv_outside_hi_symbol(Hi,Name),
     instruction_immediate_offset(Lo,Index,Offset,Size).
 symbolic_operand_attribute(Hi,1,"PCREL"),
 symbolic_operand_attribute(Hi,1,"HI"):- riscv_outside_hi_symbol(Hi,_).
 symbolic_operand_attribute(Lo,Index,"PCREL"),
 symbolic_operand_attribute(Lo,Index,"LO"):-
-    riscv_outside_section_certificate(_,Lo,Index,_,_,_,_).
+    riscv_outside_emission(_,Lo,Index,_,_,_,_).
 
 #include "riscv_outside_jump_table.dl"

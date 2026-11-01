@@ -48,6 +48,24 @@ Ddisasm accepts the following options:
     arrays and typed ELF metadata handled separately (dynamic, relocation,
     unwind, and PLT/GOT tables) do not require this override.
 
+    On RV64 ELF inputs, the same flag also permits a narrow outside-section
+    data-base guess when the complete binary proof fails. An adjacent
+    AUIPC/ADDI pair using the same register may select the unique final,
+    writable, non-executable, non-TLS zero-fill byte interval, with its computed
+    base between 1 and 2047 bytes past that interval. No relocation or bounded
+    access is required. The emitted HI expression names the **start** of the
+    interval plus the original base's offset; the LO expression names the HI
+    instruction. The warning identifies each pair and every waived proof site.
+
+    This assumes the pair executes together and its derived accesses move with
+    that interval. A rewriter must preserve the globals' offsets from the start
+    label, including through assembly and linking. A wrong provenance/section
+    guess or changed internal offsets can silently corrupt data or crash.
+    Concrete competing definitions, known entry into the LO, independent raw-HI
+    consumers, incompatible equal-base members, contradictory bounded accesses,
+    invalid geometry, and incomplete/conflicting emitted expressions still
+    refuse. `--ignore-errors` cannot enable a guess or waive its emission checks.
+
 `-K [ --keep-functions ] arg`
 :   Print the given functions even if they are skipped by default (e.g. _start)
 

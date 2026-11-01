@@ -1,0 +1,248 @@
+//===- riscv_outside_guess.dl ------------------------------*- datalog -*-===//
+//
+// Copyright (C) 2026 GrammaTech, Inc.
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// Explicitly unsafe, section-relative escape hatch. Keep strict certificates
+// and refusal evidence independent of this opt-in and of final emission.
+// In particular, no bound or relocation is required to make this guess.
+.decl riscv_outside_guess_interval(Beg:address,End:address,Section:symbol,Name:symbol)
+riscv_outside_guess_interval(Beg,End,Section,Name):-
+    option("allow-ambiguous-data-pointers"),
+    riscv_outside_last_loaded_end(End), loaded_section(Beg,End,Section), Beg < End,
+    regular_data_section(Section), bss_section(Section), !tls_section(Section),
+    section_type(Section,Type), elf_section_type("NOBITS",Type),
+    section_property(Section,"Writable"), !section_property(Section,"Executable"),
+    !section_property(Section,"Initialized"), byte_interval(Beg,End),
+    !riscv_outside_section_geometry_error(),
+    Name = cat(".L_riscv_outside_guess_",cat(Section,"_0")),
+    !symbol(_,_,_,_,_,_,_,_,Name).
+
+.decl riscv_outside_guess_ambiguous_interval()
+riscv_outside_guess_ambiguous_interval():-
+    riscv_outside_guess_interval(Beg1,End1,Section1,_),
+    riscv_outside_guess_interval(Beg2,End2,Section2,_),
+    (Beg1 != Beg2; End1 != End2; Section1 != Section2).
+
+// A finite waiver list prevents future strict-proof vetoes from silently
+// becoming overrides. Raw-upper uses, unsupported uses/widths, and contradictory
+// accesses are deliberately absent. Unknown input at LO is checked separately
+// so it cannot hide another concrete reaching definition or a known entry.
+.decl riscv_outside_guess_waivable(Reason:symbol)
+riscv_outside_guess_waivable("no bounded data access").
+riscv_outside_guess_waivable("no single data byte interval").
+riscv_outside_guess_waivable("no strictly interior data anchor").
+riscv_outside_guess_waivable("pointer passed to call").
+riscv_outside_guess_waivable("unbounded index alternative").
+riscv_outside_guess_waivable("unproved affine value").
+riscv_outside_guess_waivable("conflicting reaching pointer definition").
+riscv_outside_guess_waivable("lower consumer has another reaching definition").
+riscv_outside_guess_waivable("equal-base dependency refused").
+
+.decl riscv_outside_guess_hard_refusal(Hi:address,Lo:address,EA:address,Reason:symbol)
+.output riscv_outside_guess_hard_refusal
+
+// Negative evidence under the adjacent-pair assumption. An injected unknown
+// LO input suppresses complete_base and therefore the strict access analysis.
+// Still follow concrete definitions, copies, additions and full-width spills
+// to reject a decoded bounded access that contradicts the guessed interval.
+// This graph never contributes to strict proofs, and unknown alternatives do
+// not acquire a bound. Cyclic derivations cannot grow an unbounded relation.
+.decl riscv_outside_guess_def(Hi:address,Lo:address,Def:address,Reg:register)
+.decl riscv_outside_guess_parent(Hi:address,Lo:address,Def:address,Reg:register,
+                                 Parent:address,ParentReg:register,Offset:number)
+.decl riscv_outside_guess_index(Hi:address,Lo:address,Def:address,Reg:register,
+                                Parent:address,ParentReg:register,Index:register)
+riscv_outside_guess_def(Hi,Lo,Lo,Reg):-
+    option("allow-ambiguous-data-pointers"),
+    riscv_outside_section_candidate(Hi,Lo,2,Reg,_),
+    next(Hi,Lo), Lo = Hi+4, instruction_get_operation(Lo,"ADDI"),
+    arch.reg_arithmetic_operation(Lo,Reg,Reg,1,_).
+riscv_outside_guess_parent(Hi,Lo,EA,Dst,Parent,Src,Offset):-
+    riscv_outside_guess_def(Hi,Lo,Parent,Src), riscv_outside_rd(EA,Src,Parent),
+    riscv_outside_copy(EA,Dst,Src,Offset).
+riscv_outside_guess_index(Hi,Lo,EA,Dst,Parent,Base,Index):-
+    riscv_outside_guess_def(Hi,Lo,Parent,Base), riscv_outside_rd(EA,Base,Parent),
+    riscv_outside_add(EA,Dst,Base,Index).
+riscv_outside_guess_parent(Hi,Lo,Load,Dst,Parent,Src,0):-
+    riscv_outside_guess_def(Hi,Lo,Parent,Src), riscv_outside_rd(Store,Src,Parent),
+    riscv_outside_memory(Store,"STORE",Src,"SP","NONE",_,Slot,8),
+    riscv_outside_slot_rd(Load,Slot,Store),
+    riscv_outside_memory(Load,"LOAD",Dst,"SP","NONE",_,Slot,8).
+riscv_outside_guess_def(Hi,Lo,EA,Reg):-
+    riscv_outside_guess_parent(Hi,Lo,EA,Reg,_,_,_);
+    riscv_outside_guess_index(Hi,Lo,EA,Reg,_,_,_).
+.decl riscv_outside_guess_ancestor(Hi:address,Lo:address,Def:address,Reg:register,
+                                   Parent:address,ParentReg:register)
+riscv_outside_guess_ancestor(Hi,Lo,EA,Reg,Parent,ParentReg):-
+    riscv_outside_guess_parent(Hi,Lo,EA,Reg,Parent,ParentReg,_);
+    riscv_outside_guess_index(Hi,Lo,EA,Reg,Parent,ParentReg,_).
+riscv_outside_guess_ancestor(Hi,Lo,EA,Reg,Parent,ParentReg):-
+    riscv_outside_guess_ancestor(Hi,Lo,EA,Reg,Middle,MiddleReg),
+    riscv_outside_guess_ancestor(Hi,Lo,Middle,MiddleReg,Parent,ParentReg).
+.decl riscv_outside_guess_cycle(Hi:address,Lo:address,Def:address,Reg:register)
+riscv_outside_guess_cycle(Hi,Lo,EA,Reg):-
+    riscv_outside_guess_ancestor(Hi,Lo,EA,Reg,EA,Reg).
+.decl riscv_outside_guess_range(Hi:address,Lo:address,Def:address,Reg:register,
+                                Low:number,High:number)
+riscv_outside_guess_range(Hi,Lo,Lo,Reg,0,0):-
+    riscv_outside_guess_def(Hi,Lo,Lo,Reg).
+riscv_outside_guess_range(Hi,Lo,EA,Reg,NewLow,NewHigh):-
+    riscv_outside_guess_parent(Hi,Lo,EA,Reg,Parent,ParentReg,Offset),
+    !riscv_outside_guess_cycle(Hi,Lo,EA,Reg),
+    riscv_outside_guess_range(Hi,Lo,Parent,ParentReg,Low,High),
+    NewLow = Low+Offset, NewHigh = High+Offset,
+    NewLow >= -1048576, NewHigh <= 1048576.
+riscv_outside_guess_range(Hi,Lo,EA,Reg,NewLow,NewHigh):-
+    riscv_outside_guess_index(Hi,Lo,EA,Reg,Parent,ParentReg,Index),
+    !riscv_outside_guess_cycle(Hi,Lo,EA,Reg),
+    riscv_outside_guess_range(Hi,Lo,Parent,ParentReg,Low,High),
+    riscv_outside_rd(EA,Index,IndexDef),
+    !riscv_outside_scalar_unknown(IndexDef,Index),
+    riscv_outside_scalar_range(IndexDef,Index,IndexLow,IndexHigh),
+    NewLow = Low+IndexLow, NewHigh = High+IndexHigh,
+    NewLow >= -1048576, NewHigh <= 1048576.
+.decl riscv_outside_guess_access(Hi:address,Lo:address,EA:address,
+                                 Low:number,HighExclusive:number)
+.output riscv_outside_guess_access
+riscv_outside_guess_access(Hi,Lo,EA,LowAddress,EndAddress):-
+    riscv_outside_guess_range(Hi,Lo,Def,Base,Low,High),
+    riscv_outside_rd(EA,Base,Def),
+    riscv_outside_memory(EA,_,_,Base,"NONE",_,Disp,Width),
+    riscv_outside_section_candidate(Hi,Lo,_,_,Target),
+    LowAddress = as(Target,number)+Low+Disp,
+    EndAddress = as(Target,number)+High+Disp+as(Width,number).
+
+riscv_outside_guess_hard_refusal(Hi,Lo,EA,Reason):-
+    option("allow-ambiguous-data-pointers"),
+    riscv_outside_section_refusal(Hi,Lo,EA,Reason),
+    !riscv_outside_guess_waivable(Reason).
+riscv_outside_guess_hard_refusal(Hi,Lo,Lo,"concrete competing upper definition"):-
+    option("allow-ambiguous-data-pointers"),
+    riscv_outside_section_candidate(Hi,Lo,_,Reg,_),
+    riscv_outside_rd(Lo,Reg,Other), Other != Hi, Other != 0.
+riscv_outside_guess_hard_refusal(Hi,Lo,Lo,"known entry into lower instruction"):-
+    option("allow-ambiguous-data-pointers"),
+    riscv_outside_section_candidate(Hi,Lo,_,_,_),
+    (entry_point(Lo); riscv_outside_direct_call(_,Lo);
+     riscv_outside_direct_jump(_,Lo); riscv_outside_far_control_target(_,Lo);
+     riscv_outside_table_target(_,Lo); fde_addresses(Lo,_);
+     symbol(Lo,_,"FUNC",_,_,_,_,_,_);
+     lsda_callsite_addresses(_,_,Lo)).
+riscv_outside_guess_hard_refusal(Hi,Lo,OtherLo,"upper has another owner"):-
+    option("allow-ambiguous-data-pointers"),
+    riscv_outside_section_candidate(Hi,Lo,_,_,_),
+    (riscv_outside_pair_seed(Hi,OtherLo,_,_,_);
+     riscv_outside_legacy_pair(Hi,OtherLo)), OtherLo != Lo.
+riscv_outside_guess_hard_refusal(Hi,Lo,OtherHi,"lower has another owner"):-
+    option("allow-ambiguous-data-pointers"),
+    riscv_outside_section_candidate(Hi,Lo,_,_,_),
+    (riscv_outside_pair_seed(OtherHi,Lo,_,_,_);
+     riscv_outside_legacy_pair(OtherHi,Lo)), OtherHi != Hi.
+riscv_outside_guess_hard_refusal(Hi,Lo,EA,"independent operand expression"):-
+    option("allow-ambiguous-data-pointers"),
+    riscv_outside_section_candidate(Hi,Lo,_,_,_), (EA = Hi; EA = Lo),
+    (Offset = 0; instruction_immediate_offset(EA,_,Offset,_);
+     instruction_displacement_offset(EA,_,Offset,_)),
+    (symbolic_expr_from_relocation(EA+Offset,_,_,_,_);
+     symbol_minus_symbol_from_relocation(EA+Offset,_,_,_,_,_);
+     symbol_minus_symbol(EA+Offset,_,_,_,_,_)).
+riscv_outside_guess_hard_refusal(Hi,Lo,EA,"independent operand owner"):-
+    option("allow-ambiguous-data-pointers"),
+    riscv_outside_section_candidate(Hi,Lo,_,_,_), (EA = Hi; EA = Lo),
+    (riscv_gp_reference(EA,_,_); riscv_absolute_split_load(_,EA,_,_);
+     riscv_absolute_split_load(EA,_,_,_); riscv_legacy_printer_skipped_section(EA)).
+riscv_outside_guess_hard_refusal(Hi,Lo,EA,"bounded access contradicts guessed interval"):-
+    riscv_outside_guess_interval(Beg,End,_,_),
+    (riscv_outside_access(Hi,Lo,EA,Low,High);
+     riscv_outside_guess_access(Hi,Lo,EA,Low,High)),
+    (Low < as(Beg,number); High > as(End,number); Low >= High).
+
+.decl riscv_outside_guess_eligible(Hi:address,Lo:address,Index:operand_index,
+                                 Target:address,Beg:address,End:address,
+                                 Section:symbol,Name:symbol)
+riscv_outside_guess_eligible(Hi,Lo,2,Target,Beg,End,Section,Name):-
+    riscv_outside_guess_interval(Beg,End,Section,Name),
+    !riscv_outside_guess_ambiguous_interval(),
+    riscv_outside_section_candidate(Hi,Lo,2,Reg,Target),
+    next(Hi,Lo), Lo = Hi+4,
+    instruction(Hi,4,_,"AUIPC",_,_,_,_,_,_),
+    instruction(Lo,4,_,"ADDI",_,_,_,_,_,_),
+    arch.reg_arithmetic_operation(Lo,Reg,Reg,1,_),
+    instruction_immediate_offset(Hi,1,0,4),
+    instruction_immediate_offset(Lo,2,0,4),
+    !riscv_outside_guess_hard_refusal(Hi,Lo,_,_),
+    Target > End, Target-End <= 2047,
+    HiName = cat(".L_pcrel_",@to_string_hex(Hi)),
+    !symbol(_,_,_,_,_,_,_,_,HiName).
+
+// All definitions of one numeric base are treated as a group, including
+// incomplete proofs whose missing complete_base prevented the strict analysis
+// from discovering a dependency. A strict member retains its existing anchor.
+.decl riscv_outside_guess_group_member(Hi:address,Lo:address,Target:address,
+                                     Beg:address,End:address)
+riscv_outside_guess_group_member(Hi,Lo,Target,Beg,End):-
+    riscv_outside_guess_eligible(Hi,Lo,_,Target,Beg,End,_,_).
+riscv_outside_guess_group_member(Hi,Lo,Target,Beg,End):-
+    riscv_outside_guess_interval(Beg,End,Section,_),
+    riscv_outside_section_certificate(Hi,Lo,_,Target,Anchor,Section,_),
+    Beg <= Anchor, Anchor < End.
+.decl riscv_outside_guess_group_refused(Target:address,Beg:address,End:address)
+riscv_outside_guess_group_refused(Target,Beg,End):-
+    riscv_outside_guess_interval(Beg,End,_,_),
+    riscv_outside_pair_seed(Hi,Lo,_,_,Target),
+    !riscv_outside_guess_group_member(Hi,Lo,Target,Beg,End).
+
+.decl riscv_outside_guess(Hi:address,Lo:address,Index:operand_index,
+                         Target:address,Beg:address,End:address,
+                         Section:symbol,Name:symbol)
+.output riscv_outside_guess
+riscv_outside_guess(Hi,Lo,Index,Target,Beg,End,Section,Name):-
+    riscv_outside_guess_eligible(Hi,Lo,Index,Target,Beg,End,Section,Name),
+    !riscv_outside_section_certificate(Hi,Lo,_,_,_,_,_),
+    !riscv_outside_guess_group_refused(Target,Beg,End).
+
+// One common emission path, with no change to strict certificate selection.
+.decl riscv_outside_emission(Hi:address,Lo:address,Index:operand_index,
+                            Target:address,Anchor:address,Section:symbol,Name:symbol)
+riscv_outside_emission(Hi,Lo,Index,Target,Anchor,Section,Name):-
+    riscv_outside_section_certificate(Hi,Lo,Index,Target,Anchor,Section,Name).
+riscv_outside_emission(Hi,Lo,Index,Target,Anchor,Section,Name):-
+    riscv_outside_guess(Hi,Lo,Index,Target,Anchor,_,Section,Name).
+
+// Final-output sink only. It must never feed eligibility or group membership.
+// Require exactly the intended expression, symbol identity, and attributes at
+// both complete instructions. Merely emitting *some* expression is not enough.
+.decl riscv_outside_guess_expected(Hi:address,Lo:address,EA:address,
+                                  Name:symbol,Anchor:address,Addend:number,Kind:symbol)
+riscv_outside_guess_expected(Hi,Lo,Hi,Name,Anchor,Addend,"HI"):-
+    riscv_outside_guess(Hi,Lo,_,Target,Anchor,_,_,Name),
+    Addend = as(Target,number)-as(Anchor,number).
+riscv_outside_guess_expected(Hi,Lo,Lo,Name,Hi,0,"LO"):-
+    riscv_outside_guess(Hi,Lo,_,_,_,_,_,_), riscv_outside_hi_symbol(Hi,Name).
+.decl riscv_outside_guess_emission_error(Hi:address,Lo:address,EA:address,Reason:symbol)
+.output riscv_outside_guess_emission_error
+riscv_outside_guess_emission_error(Hi,Lo,EA,"missing intended expression or code"):-
+    riscv_outside_guess_expected(Hi,Lo,EA,Name,_,Addend,_),
+    (!symbolic_expr(EA,4,Name,Addend); !final_code_in_refined_block(EA,_)).
+riscv_outside_guess_emission_error(Hi,Lo,EA,"wrong symbol identity"):-
+    riscv_outside_guess_expected(Hi,Lo,EA,Name,Anchor,_,_),
+    (!symbolic_expr_symbol_address(EA,1,Name,Anchor);
+     symbolic_expr_symbol_address(EA,Index,Other,Address),
+       (Index != 1; Other != Name; Address != Anchor)).
+riscv_outside_guess_emission_error(Hi,Lo,EA,"conflicting expression"):-
+    riscv_outside_guess_expected(Hi,Lo,EA,Name,_,Addend,_),
+    (symbolic_expr(EA,Size,Other,Offset),
+       (Size != 4; Other != Name; Offset != Addend);
+     symbolic_expr_symbol_minus_symbol(EA,_,_,_,_,_)).
+riscv_outside_guess_emission_error(Hi,Lo,EA,"wrong expression attributes"):-
+    riscv_outside_guess_expected(Hi,Lo,EA,_,_,_,Kind),
+    (!symbolic_expr_attribute(EA,"PCREL"); !symbolic_expr_attribute(EA,Kind);
+     symbolic_expr_attribute(EA,Attribute), Attribute != "PCREL", Attribute != Kind).
+
+.decl riscv_outside_guess_warning(Hi:address,Lo:address,EA:address,Reason:symbol)
+.output riscv_outside_guess_warning
+riscv_outside_guess_warning(Hi,Lo,EA,Reason):-
+    riscv_outside_guess(Hi,Lo,_,_,_,_,_,_),
+    !riscv_outside_guess_emission_error(Hi,Lo,_,_),
+    riscv_outside_section_refusal(Hi,Lo,EA,Reason).

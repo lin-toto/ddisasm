@@ -277,6 +277,115 @@ ret
         self.assertEqual(anchor + hi.offset, high_pc + high_immediate + lower_immediate)
         return anchor, hi.offset, hi.symbol.name, lows
 
+    def test_outside_interval_override(self):
+        """Unsafe provenance may be waived; ownership and geometry may not."""
+        def pair(label, scheduled=False):
+            return (f"{label}: auipc s1,%pcrel_hi(biased)\n" +
+                    ("addi t4,zero,7\n" if scheduled else "") +
+                    f"addi s1,s1,%pcrel_lo({label})\n")
+        unbounded = "add t0,s1,a1\nld a0,-2016(t0)\n"
+        cases = {
+            "unbounded": (pair("high") + unbounded, 1),
+            "call_escape": (pair("high") + ACCESS +
+                            "mv a4,s1\njal ra,helper\n", 1),
+            "equal_group": (pair("first") + unbounded +
+                            pair("second") + unbounded, 2),
+            "incompatible_group": (pair("first") + unbounded +
+                                   pair("second", True) + unbounded, 0),
+            "nonadjacent": (pair("high", True) + unbounded, 0),
+            "direct_lower_entry": ("beqz a2,lower\nhigh: auipc s1,%pcrel_hi(biased)\n"
+                                   "lower: addi s1,s1,%pcrel_lo(high)\n" +
+                                   unbounded, 0),
+            "contradictory_access": (pair("high") + ACCESS + "ld a1,0(s1)\n", 0),
+            "raw_upper_consumer": ("high: auipc s1,%pcrel_hi(biased)\n"
+                                   "mv t1,s1\naddi s1,s1,%pcrel_lo(high)\n" +
+                                   unbounded, 0),
+        }
+        # An unknown indirect entry hides complete_base from the strict proof.
+        # It must not hide contradictory decoded accesses, including a derived
+        # base or a full-pointer spill/reload. An in-interval access stays an
+        # explicitly warned guess, never a strict certificate.
+        for name, accesses, expected in (
+                ("inside", "ld t0,-2016(s1)\n", 1),
+                ("outside", "ld t0,0(s1)\n", 0),
+                ("copy", "addi t0,s1,-2016\nld t1,2016(t0)\n", 0),
+                ("index", "li t0,16\nadd t1,s1,t0\nld t2,0(t1)\n", 0),
+                ("spill", "sd s1,0(sp)\nld t0,0(sp)\nld t1,0(t0)\n", 0)):
+            cases["unknown_entry_" + name] = (
+                ".cfi_startproc\n" + pair("high") + accesses +
+                "jalr zero,a1,0\n.cfi_endproc\n", expected)
+        for name, (body, expected) in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source, script, binary = root / "main.S", root / "link.ld", root / "main"
+                source.write_text(".option norvc\n.option norelax\n.text\n"
+                                  ".globl _start\n_start:\n" + body +
+                                  "li s1,0\nli a0,0\nret\nhelper: ret\n"
+                                  ".bss\n.space 256\n.set biased,.+1792\n")
+                script.write_text(LINKER_SCRIPT.replace(".bss 0x20000",
+                    ".eh_frame 0x1e000 : { *(.eh_frame) }\n  .bss 0x20000"))
+                self.run_command("compile", ["riscv64-linux-gnu-gcc", "-march=rv64imac",
+                    "-mabi=lp64", "-nostdlib", "-static", "-no-pie", "-g0",
+                    "-Wl,--no-relax,--build-id=none", "-T", str(script),
+                    str(source), "-o", str(binary)])
+                stripped = root / "stripped"
+                self.run_command("strip", ["riscv64-linux-gnu-strip", "--strip-all",
+                                            "-o", str(stripped), str(binary)])
+                for form, elf in (("original", binary), ("stripped", stripped)):
+                    for mode, options in (("strict", ()),
+                            ("ignore", ("--ignore-errors",)),
+                            ("override", ("--allow-ambiguous-data-pointers",))):
+                        tag = form + "-" + mode
+                        output, debug = root / (tag + ".gtirb"), root / tag
+                        result = subprocess.run(["ddisasm", str(elf), "--ir", str(output),
+                            "--debug-dir", str(debug), "-j", "1", *options],
+                            capture_output=True, timeout=self.limits["lift"])
+                        admitted = mode == "override" and expected > 0
+                        self.assertEqual(result.returncode == 0, admitted,
+                                         result.stderr.decode(errors="replace"))
+                        proof = debug / "disassembly"
+                        guesses = list(csv.reader((proof / "riscv_outside_guess.csv")
+                                                  .read_text().splitlines(), delimiter="\t"))
+                        self.assertEqual(len(guesses), expected if admitted else 0)
+                        self.assertEqual(result.stderr.count(
+                            b"Guessing RISC-V outside-section data base at HI"), len(guesses))
+                        self.assertFalse((proof / "riscv_outside_guess_emission_error.csv")
+                                         .read_text().strip())
+                        if not admitted:
+                            self.assertIn(b"refusing numeric relocation fallback", result.stderr)
+                            continue
+                        module = gtirb.IR.load_protobuf(output).modules[0]
+                        expressions = {interval.address + offset: expression
+                            for interval in module.byte_intervals
+                            for offset, expression in interval.symbolic_expressions.items()}
+                        for hi, lo, index, target, begin, end, section, label in guesses:
+                            hi, lo, target, begin = (int(x, 0) for x in (hi, lo, target, begin))
+                            high, low = expressions[hi], expressions[lo]
+                            self.assertIsInstance(high, gtirb.SymAddrConst)
+                            self.assertIsInstance(low, gtirb.SymAddrConst)
+                            self.assertEqual(high.attributes, {gtirb.SymbolicExpression.Attribute.HI,
+                                                              gtirb.SymbolicExpression.Attribute.PCREL})
+                            self.assertEqual(low.attributes, {gtirb.SymbolicExpression.Attribute.LO,
+                                                             gtirb.SymbolicExpression.Attribute.PCREL})
+                            self.assertEqual(high.symbol.name, label)
+                            self.assertIsInstance(high.symbol.referent, gtirb.DataBlock)
+                            self.assertFalse(high.symbol.at_end)
+                            self.assertEqual(high.symbol.referent.address, begin)
+                            self.assertEqual(begin, 0x20000)
+                            self.assertEqual(high.offset, target - begin)
+                            self.assertIsInstance(low.symbol.referent, gtirb.CodeBlock)
+                            self.assertFalse(low.symbol.at_end)
+                            self.assertEqual(low.symbol.referent.address, hi)
+                            self.assertEqual(low.offset, 0)
+                        warning_rows = (proof / "riscv_outside_guess_warning.csv").read_text().splitlines()
+                        pairs = {(row[0], row[1]) for row in guesses}
+                        refused_rows = (proof / "riscv_outside_section_refusal.csv").read_text().splitlines()
+                        self.assertEqual(set(warning_rows), {row for row in refused_rows
+                            if tuple(row.split("\t")[:2]) in pairs})
+                        for hi, lo, ea, reason in csv.reader(warning_rows, delimiter="\t"):
+                            self.assertIn(f"{ea} ({reason})", result.stderr.decode())
+                        self.assertIn(b"silently corrupt data or crash", result.stderr)
+
     def test_original_and_strip_all_binary_proofs(self):
         for name, (instructions, positive) in CASES.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
