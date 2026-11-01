@@ -72,12 +72,16 @@ void DisassemblyPass::loadImpl(AnalysisPassResult& Result, const gtirb::Context&
 
     if(Program)
     {
+        std::vector<std::string> Options;
         if(NoCfiDirectives)
         {
-            std::vector<std::string> Options;
             Options.push_back("no-cfi-directives");
-            relations::insert(*Program, "option", Options);
         }
+        if(AllowAmbiguousDataPointers)
+        {
+            Options.push_back("allow-ambiguous-data-pointers");
+        }
+        relations::insert(*Program, "option", Options);
     }
 }
 

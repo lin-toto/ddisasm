@@ -334,7 +334,7 @@ class RiscvOutsideSectionTest(unittest.TestCase):
                 with self.subTest(form=form):
                     result = subprocess.run(["ddisasm", str(binary), "--ir",
                         str(root / (form + ".gtirb")), "--ignore-errors",
-                        "--allow-ambiguous-data-pointers", "-j", "1"],
+                        "-j", "1"],
                         capture_output=True, timeout=self.limits["lift"])
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn(b"refusing numeric relocation fallback", result.stderr)
@@ -364,7 +364,7 @@ class RiscvOutsideSectionTest(unittest.TestCase):
                         command = ["ddisasm", str(binary), "--ir", str(output),
                                    "--debug-dir", str(debug), "-j", "1"]
                         if variant == "consumer":
-                            command += ["--ignore-errors", "--allow-ambiguous-data-pointers"]
+                            command += ["--ignore-errors"]
                         result = subprocess.run(command, capture_output=True,
                                                 timeout=self.limits["lift"])
                         if variant != "unused":
@@ -381,6 +381,55 @@ class RiscvOutsideSectionTest(unittest.TestCase):
                             self.assertIsInstance(expression, gtirb.SymAddrConst)
                             self.assertIn(attribute, expression.attributes)
                             self.assertIn(gtirb.SymbolicExpression.Attribute.PCREL, expression.attributes)
+
+    def test_legacy_raw_escape_override(self):
+        # The local callee kills A5, but its first branch ends the prefix proof.
+        # The explicit opt-in restores the pair and must retain the escape as
+        # a warning even though the numeric-conflict relation is now empty.
+        text = ("_start:\n.cfi_startproc\nauipc a5,0x10\nsd a0,8(a5)\n"
+                "jal ra,helper\nli a5,0\nli a0,0\nli a7,93\necall\n.cfi_endproc\n"
+                "helper:\n.cfi_startproc\nbeqz a0,.Lkill\nli a0,1\n"
+                ".Lkill: lui a5,0x1\nret\n.cfi_endproc\n")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for form, binary in self.compile_control_fixture(root, text):
+                for allow in (False, True):
+                    with self.subTest(form=form, allow=allow):
+                        name = form + ("-allow" if allow else "-strict")
+                        output, debug = root / (name + ".gtirb"), root / (name + "-debug")
+                        command = ["ddisasm", str(binary), "--ir", str(output),
+                                   "--debug-dir", str(debug), "-j", "1"]
+                        if allow:
+                            command.append("--allow-ambiguous-data-pointers")
+                        result = subprocess.run(command, capture_output=True,
+                                                timeout=self.limits["lift"])
+                        if not allow:
+                            self.assertNotEqual(result.returncode, 0)
+                            self.assertIn(b"unproved RISC-V legacy relocation", result.stderr)
+                            continue
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        warning = b"Allowing unproved RISC-V legacy relocation at HI 0x10000 -> LO 0x10004"
+                        self.assertEqual(result.stderr.count(warning), 1, result.stderr)
+                        self.assertIn(b"0x10008 (raw HI passed as call argument)", result.stderr)
+                        warnings = next(debug.rglob("riscv_legacy_override_warning.csv"))
+                        rows = list(csv.reader(io.StringIO(warnings.read_text()), delimiter="\t"))
+                        self.assertEqual(rows, [["0x10000", "0x10004", "0x10008",
+                                                 "raw HI passed as call argument"]])
+                        conflicts = next(debug.rglob("riscv_legacy_numeric_code_conflict.csv"))
+                        self.assertFalse(conflicts.read_text().strip())
+                        module = gtirb.IR.load_protobuf(output).modules[0]
+                        expressions = {interval.address + offset: expression
+                            for interval in module.byte_intervals if interval.address is not None
+                            for offset, expression in interval.symbolic_expressions.items()}
+                        for address, attribute, target in (
+                                (0x10000, gtirb.SymbolicExpression.Attribute.HI, 0x20008),
+                                (0x10004, gtirb.SymbolicExpression.Attribute.LO, 0x10000)):
+                            expression = expressions.get(address)
+                            self.assertIsInstance(expression, gtirb.SymAddrConst)
+                            self.assertEqual(expression.attributes,
+                                {attribute, gtirb.SymbolicExpression.Attribute.PCREL})
+                            self.assertFalse(expression.symbol.at_end)
+                            self.assertEqual(expression.symbol.referent.address + expression.offset, target)
 
     def test_legacy_memory_imports_require_fixed_prototype_nonuse(self):
         for name, register, admitted, local in (("strcmp", "a4", True, False),

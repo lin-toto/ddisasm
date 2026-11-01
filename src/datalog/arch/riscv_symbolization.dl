@@ -982,16 +982,67 @@ riscv_outside_legacy_raw_hi_escape(Hi,EA,"raw HI returned to caller"):-
 riscv_outside_uncertain_legacy_upper(Hi):-
     riscv_outside_legacy_raw_hi_escape(Hi,_,_).
 riscv_outside_legacy_pair_blocked(Hi,Lo):-
-    riscv_outside_uncertain_legacy_upper(Hi), riscv_outside_legacy_pair(Hi,Lo).
-riscv_outside_legacy_pair_blocked(Hi,Lo):-
+    riscv_outside_uncertain_legacy_upper(Hi), riscv_outside_legacy_pair(Hi,Lo),
+    !riscv_legacy_override_upper(Hi).
+
+// These ownership/proof vetoes are never relaxed by the raw-escape override.
+// Keep them separate so the opt-in cannot unblock another member of the HI.
+.decl riscv_outside_legacy_other_blocked(Hi:address,Lo:address)
+riscv_outside_legacy_other_blocked(Hi,Lo):-
     riscv_outside_section_candidate(Hi,Lo,_,_,_).
-riscv_outside_legacy_pair_blocked(Hi,Lo):-
+riscv_outside_legacy_other_blocked(Hi,Lo):-
     riscv_outside_section_candidate(Hi,OwnedLo,_,_,_),
     riscv_outside_upper_walk(Hi,Lo,Reg),
     basic_reg_def_use.used(Lo,Reg,_), Lo != OwnedLo.
-riscv_outside_legacy_pair_blocked(Hi,Lo):-
+riscv_outside_legacy_other_blocked(Hi,Lo):-
     riscv_outside_section_candidate(OtherHi,Lo,_,_,_),
     riscv_outside_legacy_pair(Hi,Lo), Hi != OtherHi.
+riscv_outside_legacy_pair_blocked(Hi,Lo):-
+    riscv_outside_legacy_other_blocked(Hi,Lo).
+
+// Establish numeric legacy operands before symbolic_expr is computed. Using
+// riscv_legacy_numeric_code_conflict here would introduce a negation cycle.
+// Explicit/independent expressions and other HI owners are outside this opt-in.
+.decl riscv_legacy_independent_operand(EA:address)
+riscv_legacy_independent_operand(EA):-
+    riscv_outside_legacy_pair(Hi,Lo), (EA = Hi; EA = Lo),
+    (Offset = 0; instruction_immediate_offset(EA,_,Offset,_);
+     instruction_displacement_offset(EA,_,Offset,_)),
+    (symbolic_expr_from_relocation(EA+Offset,_,_,_,_);
+     symbol_minus_symbol_from_relocation(EA+Offset,_,_,_,_,_);
+     symbol_minus_symbol(EA+Offset,_,_,_,_,_)).
+riscv_legacy_independent_operand(EA):- riscv_gp_reference(EA,_,_).
+riscv_legacy_independent_operand(EA):- riscv_absolute_split_load(_,EA,_,_).
+
+.decl riscv_legacy_override_pair_candidate(Hi:address,Lo:address)
+riscv_legacy_override_pair_candidate(Hi,Lo):-
+    (riscv_split_load(Hi,Lo,Index,_);
+     riscv_pcrel_control_transfer(Hi,Lo,Index,_)),
+    code(Hi), code(Lo), !riscv_ambiguous_split_hi(Hi),
+    instruction_immediate_offset(Hi,1,_,_),
+    (instruction_immediate_offset(Lo,Index,_,_);
+     instruction_displacement_offset(Lo,Index,_,_);
+     riscv_split_load_zero_addi_alias(Hi,Lo,_);
+     riscv_pcrel_control_transfer(Hi,Lo,1,_),
+       instruction(Lo,_,_,Operation,_,0,0,0,_,_),
+       riscv_zero_offset_transfer_operation(Operation)),
+    !riscv_legacy_independent_operand(Hi), !riscv_legacy_independent_operand(Lo),
+    !riscv_legacy_printer_skipped_section(Hi), !riscv_legacy_printer_skipped_section(Lo).
+
+.decl riscv_legacy_override_ineligible_upper(Hi:address)
+riscv_legacy_override_ineligible_upper(Hi):-
+    riscv_outside_legacy_pair(Hi,Lo), !riscv_legacy_override_pair_candidate(Hi,Lo).
+riscv_legacy_override_ineligible_upper(Hi):-
+    riscv_outside_legacy_pair(Hi,Lo), (EA = Hi; EA = Lo),
+    riscv_outside_legacy_pair(OtherHi,EA), OtherHi != Hi.
+
+.decl riscv_legacy_override_upper(Hi:address)
+riscv_legacy_override_upper(Hi):-
+    option("allow-ambiguous-data-pointers"),
+    riscv_outside_uncertain_legacy_upper(Hi), riscv_outside_legacy_pair(Hi,_),
+    !riscv_outside_legacy_other_blocked(Hi,_),
+    !riscv_legacy_override_ineligible_upper(Hi).
+
 // Fixed C11 string/memory and single-FILE* prototypes constrain only proved PLT imports.
 // Defined functions with these names, variadic functions and unlisted imports
 // receive no summary. This does not relax completed outside-pointer escapes.
@@ -1047,18 +1098,26 @@ riscv_outside_legacy_call_nonuse(Hi,Call,Reg):-
 // Final-emission safety sink only: never feed this back into pair proofs.
 // The complete/dynamic ELF printer skips exactly these source sections.
 // This exception is a complete-consumer contract, not a static-policy claim.
-.decl riscv_legacy_printer_skipped(EA:address)
-riscv_legacy_printer_skipped(EA):-
+.decl riscv_legacy_printer_skipped_section(EA:address)
+riscv_legacy_printer_skipped_section(EA):-
     loaded_section(Beg,End,Name),
     (Name = ".plt"; Name = ".plt.sec"; Name = ".plt.got"),
-    final_code_in_refined_block(EA,_),
+    instruction(EA,_,_,_,_,_,_,_,_,_),
     Beg <= EA, EA < End.
+.decl riscv_legacy_printer_skipped(EA:address)
+riscv_legacy_printer_skipped(EA):-
+    riscv_legacy_printer_skipped_section(EA), final_code_in_refined_block(EA,_).
+// Attempted overrides still pass through the final-emission safety check.
+// An unexpected failure to emit a normal expression must remain fatal.
+.decl riscv_legacy_checked_pair(Hi:address,Lo:address)
+riscv_legacy_checked_pair(Hi,Lo):- riscv_outside_legacy_pair_blocked(Hi,Lo).
+riscv_legacy_checked_pair(Hi,Lo):-
+    riscv_legacy_override_upper(Hi), riscv_outside_legacy_pair(Hi,Lo).
 // Key refusal on actual final exported expressions, including whole-instruction
 // forms. A structural transfer fact alone is never evidence of emission.
 .decl riscv_legacy_exported_operand(EA:address)
 riscv_legacy_exported_operand(EA):-
-    (riscv_outside_legacy_pair_blocked(EA,_);
-     riscv_outside_legacy_pair_blocked(_,EA)),
+    (riscv_legacy_checked_pair(EA,_); riscv_legacy_checked_pair(_,EA)),
     (Offset = 0; instruction_immediate_offset(EA,_,Offset,_);
      instruction_displacement_offset(EA,_,Offset,_)),
     (symbolic_expr(EA+Offset,_,_,_);
@@ -1066,11 +1125,22 @@ riscv_legacy_exported_operand(EA):-
 .decl riscv_legacy_numeric_code_conflict(Hi:address,Lo:address,EA:address)
 .output riscv_legacy_numeric_code_conflict
 riscv_legacy_numeric_code_conflict(Hi,Lo,EA):-
-    riscv_outside_legacy_pair_blocked(Hi,Lo), (EA = Hi; EA = Lo),
+    riscv_legacy_checked_pair(Hi,Lo), (EA = Hi; EA = Lo),
     final_code_in_refined_block(EA,_), !riscv_legacy_printer_skipped(EA),
     (instruction_immediate_offset(EA,_,_,_);
      instruction_displacement_offset(EA,_,_,_)),
     !riscv_legacy_exported_operand(Hi), !riscv_legacy_exported_operand(Lo).
+
+// The old conflict disappears on success. Retain every escape separately;
+// C++ emits one warning per pair, listing all sites and reasons deterministically.
+.decl riscv_legacy_override_warning(Hi:address,Lo:address,EA:address,Reason:symbol)
+.output riscv_legacy_override_warning
+riscv_legacy_override_warning(Hi,Lo,EA,Reason):-
+    riscv_legacy_override_upper(Hi), riscv_outside_legacy_pair(Hi,Lo),
+    !riscv_outside_legacy_pair_blocked(Hi,Lo),
+    riscv_legacy_exported_operand(Hi), riscv_legacy_exported_operand(Lo),
+    (final_code_in_refined_block(Hi,_); final_code_in_refined_block(Lo,_)),
+    riscv_outside_legacy_raw_hi_escape(Hi,EA,Reason).
 
 // One physical HI is one relocation group. A genuine operand conflict on
 // one member cannot leave another inferred member relocating that same HI.

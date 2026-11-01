@@ -2011,6 +2011,29 @@ void performSanityChecks(AnalysisPassResult &Result, souffle::SouffleProgram &Pr
                          bool selfDiagnose, bool ignoreErrors)
 {
     std::list<std::string> &Messages = ignoreErrors ? Result.Warnings : Result.Errors;
+    if(auto Overrides = Program.getRelation("riscv_legacy_override_warning"))
+    {
+        using Pair = std::pair<uint64_t, uint64_t>;
+        std::map<Pair, std::set<std::pair<uint64_t, std::string>>> Escapes;
+        for(auto &Output : *Overrides)
+        {
+            uint64_t High, Low, Address;
+            std::string Reason;
+            Output >> High >> Low >> Address >> Reason;
+            Escapes[{High, Low}].emplace(Address, Reason);
+        }
+        for(const auto &[Endpoints, Sites] : Escapes)
+        {
+            std::stringstream Warning;
+            Warning << "Allowing unproved RISC-V legacy relocation at HI 0x" << std::hex
+                    << Endpoints.first << " -> LO 0x" << Endpoints.second
+                    << " with --allow-ambiguous-data-pointers; escape(s):";
+            for(const auto &[Address, Reason] : Sites)
+                Warning << " 0x" << Address << " (" << Reason << ")";
+            Warning << ". Relayout may change an escaping raw upper value.";
+            Result.Warnings.push_back(Warning.str());
+        }
+    }
     // This is a relocation safety conflict, not an optional sanity warning.
     if(auto Conflicts = Program.getRelation("riscv_legacy_numeric_code_conflict"))
     {
@@ -2021,7 +2044,8 @@ void performSanityChecks(AnalysisPassResult &Result, souffle::SouffleProgram &Pr
             std::stringstream Error;
             Error << "unproved RISC-V legacy relocation at 0x" << std::hex << High
                   << " -> 0x" << Low << " (numeric operand 0x" << Address << ")"
-                  << "; refusing numeric relocation fallback.";
+                  << "; refusing numeric relocation fallback."
+                  << " --allow-ambiguous-data-pointers can override raw-upper escapes only.";
             Result.Errors.push_back(Error.str());
         }
     }
