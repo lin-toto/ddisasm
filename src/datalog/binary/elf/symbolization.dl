@@ -389,9 +389,19 @@ symbolic_expr_from_relocation(EA,Size/8,Symbol,0,TargetEA):-
     // Addend is the offset of a symbol within the Section.
     TargetEA = as(as(Begin,number)+Addend+Adjustment,address),
     (
-        symbol(TargetEA,_,_,_,_,_,_,_,Symbol);
-        !symbol(TargetEA,_,_,_,_,_,_,_,_), Symbol = ""
+        relocation_target_symbol(TargetEA,Symbol);
+        !relocation_target_symbol(TargetEA,_), Symbol = ""
     ).
+
+// ARM mapping symbols ($a, $d, $t*, $x) mark code and data at an address and are
+// removed from the module after the lift (Disassembler.cpp). A static function
+// that starts its object's .text shares its address with $x, so a relocation
+// must name the function's own symbol, or none.
+.decl relocation_target_symbol(EA:address,Symbol:symbol)
+
+relocation_target_symbol(EA,Symbol):-
+    symbol(EA,_,_,_,_,_,_,_,Symbol),
+    !match("[$]([adx]|t.*)",Symbol).
 
 symbolic_expr_from_relocation(EA,Size,Symbol,Addend,TargetEA):-
     binary_format("ELF"),
